@@ -24,5 +24,5 @@ export default defineConfig({
       'ztt.aimixtech.com'
     ],
   },
-  base: '/CueAimer/'
+  base: process.env.NODE_ENV === 'production' ? '/CueAimer/' : '/',
 })
