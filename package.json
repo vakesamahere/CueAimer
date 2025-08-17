@@ -11,8 +11,7 @@
     "build": "vite build",
     "preview": "vite preview",
     "build-only": "vite build",
-    "type-check": "vue-tsc --build",
-    "deploy": "sh deploy.sh"
+    "type-check": "vue-tsc --build"
   },
   "dependencies": {
     "vue": "^3.5.18",
