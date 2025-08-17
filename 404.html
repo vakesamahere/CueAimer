@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Redirecting...</title>
+  <script>
+    // Function to get the base URL from the current script's path
+    function getBaseUrl() {
+      const path = window.location.pathname;
+      const repoName = 'CueAimer'; // Replace with your repository name
+      const baseIndex = path.indexOf('/' + repoName);
+      if (baseIndex !== -1) {
+        return path.substring(0, baseIndex + repoName.length + 1);
+      }
+      return '/'; // Default to root if not found
+    }
+
+    // Get the base URL
+    const baseUrl = getBaseUrl();
+
+    // Redirect to the base URL's index.html
+    window.location.replace(baseUrl);
+  </script>
+</head>
+<body>
+  <p>If you are not redirected automatically, follow this <a href="/">link</a>.</p>
+</body>
+</html>
