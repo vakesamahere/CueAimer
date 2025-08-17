@@ -23,5 +23,6 @@ export default defineConfig({
       '*',
       'ztt.aimixtech.com'
     ],
-  }
+  },
+  base: '/CueAimer/'
 })
