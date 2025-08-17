@@ -45,7 +45,7 @@ const stLine = new Line(c2, c3, { strokeStyle: '#a78bfa', lineWidth: 1, dashed: 
 const showCueLine = ref(true)
 const showHitLine = ref(true)
 const showAimLine = ref(true)
-const showSTLine = ref(true)
+const showSTLine = ref(false)
 const showCueRay = ref(true)
 const showCrossGuides = ref(true)
 const showCorridor = ref(true)
@@ -53,6 +53,10 @@ const showAngleCueHit = ref(true)
 const showAngleHV = ref(true)
 const showLengths = ref(true)
 const hvOffsetMul = ref(6) // 与水平/竖直角度标注距交点的倍数（×球半径）
+// 关键偏移桥模式与读数
+type BridgeMode = 'tangent' | 'horizontal' | 'vertical'
+const bridgeMode = ref<BridgeMode>('tangent')
+const bridgeLenCm = ref<string>('—')
 
 // 初始化 Window
 let win = new Window(0, 0, 800, 500)
@@ -526,10 +530,10 @@ function drawCueRay() {
   ctx.restore()
 }
 
-// 目标球切线桥：在绿线与目标球的交点处，沿切线（垂直绿线）向蓝色虚线作垂线段，并标注长度
+// 目标球切线桥/水平桥/竖直桥：在绿线与目标球的接触点处，向蓝色虚线作线段，并标注长度
 function drawTangentBridge() {
   if (!ctx) return
-  if (!c2.config.visible || !showCueLine.value || !showHitLine.value) return
+  if (!c2.config.visible) { bridgeLenCm.value = '—'; return }
 
   const p1 = { x: c1.position.x, y: c1.position.y } // 母球
   const p2 = { x: c2.position.x, y: c2.position.y } // 虚影
@@ -538,28 +542,31 @@ function drawTangentBridge() {
   // 绿线方向（c1 -> c3）
   const vHit = { x: p3.x - p1.x, y: p3.y - p1.y }
   const Lh = Math.hypot(vHit.x, vHit.y)
-  if (!(Lh > 1e-6)) return
+  if (!(Lh > 1e-6)) { bridgeLenCm.value = '—'; return }
   const uh = { x: vHit.x / Lh, y: vHit.y / Lh }
 
-  // 绿线与目标球的交点（靠近 c1 的切点）
+  // 绿线与目标球的接触点（靠近 c1）
   const contact = { x: p3.x - uh.x * c3.radius, y: p3.y - uh.y * c3.radius }
 
   // 蓝色虚线方向（c1 -> c2）
   const vCue = { x: p2.x - p1.x, y: p2.y - p1.y }
   const Lc = Math.hypot(vCue.x, vCue.y)
-  if (!(Lc > 1e-6)) return
+  if (!(Lc > 1e-6)) { bridgeLenCm.value = '—'; return }
   const uc = { x: vCue.x / Lc, y: vCue.y / Lc }
 
-  // 切线（垂直绿线）
-  const n = { x: -uh.y, y: uh.x }
-  const cross2 = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx
-  const denom = cross2(n.x, n.y, uc.x, uc.y)
-  if (Math.abs(denom) <= 1e-8) return // 平行，跳过
+  // 根据模式选择桥线方向
+  let dir = { x: -uh.y, y: uh.x } // 切线：垂直绿线
+  if (bridgeMode.value === 'horizontal') dir = { x: 1, y: 0 }
+  if (bridgeMode.value === 'vertical')   dir = { x: 0, y: 1 }
 
-  // 交点：contact + n*t 与 c1 + uc*s 的交点
+  const cross2 = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx
+  const denom = cross2(dir.x, dir.y, uc.x, uc.y)
+  if (Math.abs(denom) <= 1e-8) { bridgeLenCm.value = '—'; return } // 平行
+
+  // 交点：contact + dir*t 与 p1 + uc*s 的交点
   const diff = { x: p1.x - contact.x, y: p1.y - contact.y }
   const t = cross2(diff.x, diff.y, uc.x, uc.y) / denom
-  const inter = { x: contact.x + n.x * t, y: contact.y + n.y * t }
+  const inter = { x: contact.x + dir.x * t, y: contact.y + dir.y * t }
 
   // 绘制与标注
   const sA = win.toScreen(contact)
@@ -576,6 +583,7 @@ function drawTangentBridge() {
   ctx.restore()
 
   const l = lengthCm(sA, sB).cm.toFixed(1) + ' cm'
+  bridgeLenCm.value = l
   const m = mid(sA, sB)
   drawTextLabel(l, m.x, m.y - 12)
 }
@@ -769,6 +777,26 @@ onBeforeUnmount(() => {
           <label>
             倍数
             <input type="number" min="0.5" max="6" step="0.1" v-model.number="hvOffsetMul" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>关键信息，瞄准偏移</legend>
+          <label>
+            偏移长度
+            <output>{{ bridgeLenCm }}</output>
+          </label>
+          <label>
+            <input type="radio" value="tangent" v-model="bridgeMode" />
+            切线（垂直绿线）
+          </label>
+          <label>
+            <input type="radio" value="horizontal" v-model="bridgeMode" />
+            水平线（过切点）
+          </label>
+          <label>
+            <input type="radio" value="vertical" v-model="bridgeMode" />
+            竖直线（过切点）
           </label>
         </fieldset>
       </div>
