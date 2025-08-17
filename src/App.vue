@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watchEffect } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watchEffect, watch } from 'vue'
 import { Window, Layer } from '@/utils/window'
 import { Circle, Line } from '@/utils/Shapes'
 
@@ -27,6 +27,9 @@ const pxPerCm = ref(6.0) // 默认 6 px/cm
 const r = ref(ballRadiusCm) // cm
 // 口袋半径（cm）可调
 const pocketRcm = ref(pocketRadiusCm)
+
+// 添加初始化完成标志（需要在watchEffect之前定义）
+const isInitialized = ref(false)
 
 // 4 个圆：1=母球，2=母球击中目标球时的“虚影”，3=目标球，4=球洞
 const rPxInit = r.value * pxPerCm.value
@@ -169,14 +172,18 @@ watchEffect(() => {
   void c3.position.x; void c3.position.y
   void c4.position.x; void c4.position.y
   const _ratio = pxPerCm.value
-  resizeCanvas()
+  if (isInitialized.value) {
+    // resizeCanvas()
+  }
   recomputeC2()
 })
 
 // 口袋半径改变时，重算像素半径并刷新
 watchEffect(() => {
   void pocketRcm.value
-  resizeCanvas()
+  if (isInitialized.value) {
+    resizeCanvas()
+  }
   recomputeC2()
 })
 
@@ -188,9 +195,36 @@ watchEffect(() => {
   stLine.config.visible = showSTLine.value
 })
 
+
+
 // ========== 鼠标交互：拖动 c1、c3；点击选择洞 ==========
 type Dragging = 'c1' | 'c3' | null
 let dragging: Dragging = null
+
+// 点击移动模式
+const clickMoveMode = ref(false)
+type ClickMoveState = 'none' | 'selected_c1' | 'selected_c3'
+let clickMoveState: ClickMoveState = 'none'
+
+// 侧栏控制
+type SelectedBall = 'cue' | 'target'
+const selectedBall = ref<SelectedBall>('cue')
+const horizontalPosition = ref(0) // 0-100 百分比，初始化为0，稍后会根据球位置更新
+const verticalPosition = ref(0)   // 0-100 百分比，初始化为0，稍后会根据球位置更新
+
+// 只监听滑动条变化，更新球位置
+watch([horizontalPosition, verticalPosition], () => {
+  if (isInitialized.value) {
+    updateBallFromSliders()
+  }
+})
+
+// 监听selectedBall变化，更新滑动条到新选中球的位置
+watch(selectedBall, () => {
+  if (isInitialized.value) {
+    updateSlidersFromBall()
+  }
+})
 
 function getPointerWorld(e: MouseEvent) {
   const cvs = canvasRef.value!
@@ -224,8 +258,10 @@ function onMouseDown(e: MouseEvent) {
   e.preventDefault()
   if (tryPickPocket(e)) {
     dragging = null
+    clickMoveState = 'none'
     return
   }
+
   const p = getPointerWorld(e)
   const s1 = win.toScreen(c1.position)
   const s3 = win.toScreen(c3.position)
@@ -233,22 +269,103 @@ function onMouseDown(e: MouseEvent) {
   const d3 = Math.hypot(p.x - s3.x, p.y - s3.y)
   const within1 = d1 <= c1.radius + 6
   const within3 = d3 <= c3.radius + 6
-  if (within1 && within3) dragging = 'c1'
-  else if (within1) dragging = 'c1'
-  else if (within3) dragging = 'c3'
-  else dragging = null
+
+  if (clickMoveMode.value) {
+    // 点击移动模式
+    if (within1) {
+      clickMoveState = 'selected_c1'
+      dragging = null
+    } else if (within3) {
+      clickMoveState = 'selected_c3'
+      dragging = null
+    } else {
+      // 点击空白处，移动已选中的球
+      if (clickMoveState === 'selected_c1') {
+        c1.moveTo(p.x, p.y)
+        if (selectedBall.value === 'cue') updateSlidersFromBall()
+        recomputeC2()
+      } else if (clickMoveState === 'selected_c3') {
+        c3.moveTo(p.x, p.y)
+        if (selectedBall.value === 'target') updateSlidersFromBall()
+        recomputeC2()
+      }
+      clickMoveState = 'none'
+    }
+  } else {
+    // 传统拖动模式
+    if (within1 && within3) dragging = 'c1'
+    else if (within1) dragging = 'c1'
+    else if (within3) dragging = 'c3'
+    else dragging = null
+    clickMoveState = 'none'
+  }
 }
 
 function onMouseMove(e: MouseEvent) {
-  if (!dragging) return
+  if (!dragging || clickMoveMode.value) return
   const p = getPointerWorld(e)
-  if (dragging === 'c1') c1.moveTo(p.x, p.y)
-  else if (dragging === 'c3') c3.moveTo(p.x, p.y)
+  if (dragging === 'c1') {
+    c1.moveTo(p.x, p.y)
+    if (selectedBall.value === 'cue') updateSlidersFromBall()
+  } else if (dragging === 'c3') {
+    c3.moveTo(p.x, p.y)
+    if (selectedBall.value === 'target') updateSlidersFromBall()
+  }
   recomputeC2()
 }
 
-function onMouseUp()   { dragging = null }
-function onMouseLeave(){ dragging = null }
+function onMouseUp()   {
+  dragging = null
+}
+function onMouseLeave(){
+  dragging = null
+  clickMoveState = 'none'
+}
+
+// 根据滑动条位置更新球的位置
+function updateBallFromSliders() {
+  const { offX, drawW, offY, drawH } = getTableFrame()
+  const margin = cushionMarginCm * pxPerCm.value
+
+  // 计算可移动区域（考虑球的半径和胶边）
+  const ballRadius = r.value * pxPerCm.value
+  const minX = offX + margin + ballRadius
+  const maxX = offX + drawW - margin - ballRadius
+  const minY = offY + margin + ballRadius
+  const maxY = offY + drawH - margin - ballRadius
+
+  // 根据百分比计算实际位置
+  const x = minX + (maxX - minX) * (horizontalPosition.value / 100)
+  const y = minY + (maxY - minY) * (verticalPosition.value / 100)
+
+  if (selectedBall.value === 'cue') {
+    c1.moveTo(x, y)
+  } else {
+    c3.moveTo(x, y)
+  }
+  recomputeC2()
+}
+
+// 根据球的位置更新滑动条
+function updateSlidersFromBall() {
+  const { offX, drawW, offY, drawH } = getTableFrame()
+  const margin = cushionMarginCm * pxPerCm.value
+  const ballRadius = r.value * pxPerCm.value
+
+  const minX = offX + margin + ballRadius
+  const maxX = offX + drawW - margin - ballRadius
+  const minY = offY + margin + ballRadius
+  const maxY = offY + drawH - margin - ballRadius
+
+  const ball = selectedBall.value === 'cue' ? c1 : c3
+
+  // 计算百分比位置
+  const hPercent = Math.max(0, Math.min(100, ((ball.position.x - minX) / (maxX - minX)) * 100))
+  const vPercent = Math.max(0, Math.min(100, ((ball.position.y - minY) / (maxY - minY)) * 100))
+
+  horizontalPosition.value = hPercent
+  verticalPosition.value = vPercent
+}
 
 // 重置：母球/目标球到桌心，视角置中、默认左上角袋
 function resetAll() {
@@ -266,6 +383,8 @@ function resetAll() {
   win.pos.y.value = 0
   win.horizon.x.value = 0
   win.horizon.y.value = 0
+  clickMoveState = 'none'
+  updateSlidersFromBall()
   recomputeC2()
 }
 
@@ -659,6 +778,12 @@ onMounted(() => {
     recomputeC2()
   }
 
+  // 初始化滑动条值为当前选中球的位置
+  updateSlidersFromBall()
+
+  // 标记初始化完成，启用监听器
+  isInitialized.value = true
+
   window.addEventListener('resize', resizeCanvas)
 
   // 事件绑定
@@ -694,43 +819,13 @@ onBeforeUnmount(() => {
       <h2>台球几何约束演示</h2>
       <p class="hint">
         约束：r1 = r2 = r；并单独让 r3 = r。动态计算 c2，使 c2、c3、c4 三点共线且 c2 与 c3 外切。<br>
-        鼠标：拖动母球(c1)/目标球(c3)；点击 8 个洞选择目标洞(c4)。
+        鼠标：拖动母球(c1)/目标球(c3)；点击 8 个洞选择目标洞(c4)。<br>
+        点击移动模式：先点击球选中，再点击空白处移动。侧栏可精确控制球位置。
       </p>
 
       <div class="grid">
-        <fieldset>
-          <legend>比例/尺寸</legend>
-          <label>
-            桌面缩放(px/cm)
-            <input type="range" min="2" max="20" step="0.5" v-model.number="pxPerCm" />
-          </label>
-          <label>
-            px/cm
-            <input type="number" min="0.5" step="0.5" v-model.number="pxPerCm" />
-          </label>
 
-          <label>
-            球半径 r(cm)
-            <input type="range" min="1" max="4" step="0.1" v-model.number="r" />
-          </label>
-          <label>
-            r(cm)
-            <input type="number" min="1" step="0.1" v-model.number="r" />
-          </label>
-
-          <label>
-            口袋半径(cm)
-            <input type="range" min="3" max="10" step="0.2" v-model.number="pocketRcm" />
-          </label>
-          <label>
-            口袋半径(cm)
-            <input type="number" min="3" max="10" step="0.1" v-model.number="pocketRcm" />
-          </label>
-
-          <button type="button" class="btn" @click="resetAll">重置</button>
-        </fieldset>
-
-        <fieldset>
+        <!-- <fieldset>
           <legend>母球 c1</legend>
           <label>
             x
@@ -740,9 +835,9 @@ onBeforeUnmount(() => {
             y
             <input type="number" v-model.number="c1.position.y" />
           </label>
-        </fieldset>
+        </fieldset> -->
 
-        <fieldset>
+        <!-- <fieldset>
           <legend>目标球 c3</legend>
           <label>
             x
@@ -751,6 +846,46 @@ onBeforeUnmount(() => {
           <label>
             y
             <input type="number" v-model.number="c3.position.y" />
+          </label>
+        </fieldset> -->
+
+        <fieldset>
+          <legend>交互模式</legend>
+          <label>
+            <input type="checkbox" v-model="clickMoveMode" />
+            点击移动模式
+          </label>
+          <p v-if="clickMoveMode" class="mode-hint">
+            点击球选中，再点击空白处移动
+            <span v-if="clickMoveState === 'selected_c1'" class="selected">（已选中母球）</span>
+            <span v-if="clickMoveState === 'selected_c3'" class="selected">（已选中目标球）</span>
+          </p>
+        </fieldset>
+
+        <fieldset>
+          <legend>精确位置控制</legend>
+          <label>
+            控制球
+            <select v-model="selectedBall">
+              <option value="cue">母球</option>
+              <option value="target">目标球</option>
+            </select>
+          </label>
+          <label>
+            水平位置
+            <input type="range" min="0" max="100" step="1" v-model.number="horizontalPosition" />
+          </label>
+          <label>
+            水平 %
+            <input type="number" min="0" max="100" step="1" v-model.number="horizontalPosition" />
+          </label>
+          <label>
+            竖直位置
+            <input type="range" min="0" max="100" step="1" v-model.number="verticalPosition" />
+          </label>
+          <label>
+            竖直 %
+            <input type="number" min="0" max="100" step="1" v-model.number="verticalPosition" />
           </label>
         </fieldset>
 
@@ -799,6 +934,39 @@ onBeforeUnmount(() => {
             竖直线（过切点）
           </label>
         </fieldset>
+
+        <fieldset>
+          <legend>比例/尺寸</legend>
+          <label>
+            桌面缩放(px/cm)
+            <input type="range" min="2" max="20" step="0.5" v-model.number="pxPerCm" />
+          </label>
+          <label>
+            px/cm
+            <input type="number" min="0.5" step="0.5" v-model.number="pxPerCm" />
+          </label>
+
+          <label>
+            球半径 r(cm)
+            <input type="range" min="1" max="4" step="0.1" v-model.number="r" />
+          </label>
+          <label>
+            r(cm)
+            <input type="number" min="1" step="0.1" v-model.number="r" />
+          </label>
+
+          <label>
+            口袋半径(cm)
+            <input type="range" min="3" max="10" step="0.2" v-model.number="pocketRcm" />
+          </label>
+          <label>
+            口袋半径(cm)
+            <input type="number" min="3" max="10" step="0.1" v-model.number="pocketRcm" />
+          </label>
+
+          <button type="button" class="btn" @click="resetAll">重置</button>
+        </fieldset>
+
       </div>
 
       <p v-if="!solvable" class="warn">
@@ -808,6 +976,11 @@ onBeforeUnmount(() => {
 
     <div class="stage">
       <canvas ref="canvasRef" class="cvs"></canvas>
+    </div>
+
+    <div class="output-box">
+      Offset = 
+      <output>{{ bridgeLenCm }}</output>
     </div>
   </div>
 </template>
@@ -893,5 +1066,69 @@ input[type="number"] {
   height: 100%;
   display: block;
   cursor: crosshair;
+}
+/* 新增样式 */
+.mode-hint {
+  font-size: 11px;
+  color: #059669;
+  margin: 4px 0 0 0;
+  padding: 4px 6px;
+  background: #ecfdf5;
+  border-radius: 4px;
+  border: 1px solid #d1fae5;
+}
+
+.selected {
+  font-weight: bold;
+  color: #dc2626;
+}
+
+select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 4px 6px;
+  border: 1px solid #d1d5db;
+  border-radius: 4px;
+  background: white;
+  font-size: 12px;
+}
+
+.output-box {
+  position: fixed;
+  bottom: 16px;
+  right: 16px;
+  font-size: 22px;
+  color: #000000;
+  font-weight: bold;
+}
+
+/* 响应式与滚动控制补充 */
+.panel {
+  overflow: auto;
+}
+
+@media (max-width: 768px) {
+  .wrap {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+    height: 100vh;
+  }
+  .panel {
+    max-height: 40vh;
+  }
+  .stage {
+    height: 60vh;
+  }
+  .cvs {
+    height: 100%;
+  }
+}
+</style>
+<style>
+html, body, #app {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  overflow: hidden; /* 禁用页面滚动 */
 }
 </style>
