@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, ref, watchEffect, watch } from 'vue'
+import { onMounted, onBeforeUnmount, ref, watchEffect, watch, computed } from 'vue'
 import { Window, Layer } from '@/utils/window'
 import { Circle, Line } from '@/utils/Shapes'
 
@@ -13,9 +13,9 @@ let rafId = 0
 const lineLayer = new Layer()
 const circleLayer = new Layer()
 
-// 真实尺寸（近似常见 9 尺桌，单位 cm）
-const tableWcm = 254
-const tableHcm = 127
+// 真实尺寸（近似常见 9 尺桌，单位 cm）- 改为响应式
+const tableWcm = ref(254)
+const tableHcm = ref(127)
 const cushionMarginCm = 3.5 // 胶边内缩
 const pocketRadiusCm = 6.0  // 近似袋口半径
 const ballRadiusCm = 2.86   // 球半径（57.15mm 直径）
@@ -23,10 +23,12 @@ const ballRadiusCm = 2.86   // 球半径（57.15mm 直径）
 // 全局比例：每厘米多少像素（用于把长度转为 cm）
 const pxPerCm = ref(6.0) // 默认 6 px/cm
 
-// 变量：主半径 r（用于 r1 与 r2），目标球半径 r3 单独赋值设为 r（保留未来解耦空间）
-const r = ref(ballRadiusCm) // cm
-// 口袋半径（cm）可调
-const pocketRcm = ref(pocketRadiusCm)
+// 变量：球直径设置，半径通过计算得出
+const ballDiameter = ref(ballRadiusCm * 2) // cm，直径
+const r = computed(() => ballDiameter.value / 2) // cm，半径
+// 口袋直径设置，半径通过计算得出
+const pocketDiameter = ref(pocketRadiusCm * 2) // cm，直径
+const pocketRcm = computed(() => pocketDiameter.value / 2) // cm，半径
 
 // 添加初始化完成标志（需要在watchEffect之前定义）
 const isInitialized = ref(false)
@@ -38,26 +40,34 @@ const c2 = new Circle(220, 120, rPxInit, { strokeStyle: '#334155', lineWidth: 2,
 const c3 = new Circle(180, 220, rPxInit, { strokeStyle: '#111827', fillStyle: '#f59e0b', lineWidth: 2 }) // 目标球：实心黄
 const c4 = new Circle(360, 80, pocketRadiusCm * pxPerCm.value, { fillStyle: '#111827', strokeStyle: '#111827', lineWidth: 1 }) // 洞（实心深色）
 
-// 线段：c3->c4（目标球朝洞）、c1->c2（发射线）、c1->c3（母球到目标球）、c2->c3（虚影到目标球）
+// 线段：c3->c4（目标球朝洞）、c1->c2（发射线）、c1->c3（母球到目标球）、c2->c3（虚影到目标球）、c4->c3（球洞到目标球射线）
 const aimLine = new Line(c3, c4, { strokeStyle: '#94a3b8', lineWidth: 1 })
 const cueLine = new Line(c1, c2, { strokeStyle: '#60a5fa', lineWidth: 1, dashed: [4, 4] })
 const hitLine = new Line(c1, c3, { strokeStyle: '#22c55e', lineWidth: 1 })
 const stLine = new Line(c2, c3, { strokeStyle: '#a78bfa', lineWidth: 1, dashed: [4, 4] }) // shadow-target
+const pocketRayLine = new Line(c4, c3, { strokeStyle: '#f97316', lineWidth: 1, dashed: [4, 4] }) // 球洞到目标球射线（虚线）
 
 // 显示开关
 const showCueLine = ref(true)
 const showHitLine = ref(true)
 const showAimLine = ref(true)
 const showSTLine = ref(false)
+const showPocketRay = ref(true) // 球洞到目标球射线
 const showCueRay = ref(true)
-const showCrossGuides = ref(true)
+const showCrossGuides = ref(false)
 const showCorridor = ref(true)
-const showAngleCueHit = ref(true)
-const showAngleHV = ref(true)
-const showLengths = ref(true)
+const showAngleCueHit = ref(false)
+const showAngleHV = ref(false)
+const showLengths = ref(false)
+const showPocketHitAngle = ref(true) // 显示球洞射线与视线的夹角
 const hvOffsetMul = ref(6) // 与水平/竖直角度标注距交点的倍数（×球半径）
+const pocketAngleDistance = ref(3) // 球洞射线角度标注距离交点的倍数（×球半径）
+// 视线生成逻辑
+type HitLineMode = 'center' | 'ghost'
+const hitLineMode = ref<HitLineMode>('ghost')
+
 // 关键偏移桥模式与读数
-type BridgeMode = 'tangent' | 'horizontal' | 'vertical'
+type BridgeMode = 'tangent' | 'horizontal' | 'vertical' | 'pocket_ray'
 const bridgeMode = ref<BridgeMode>('tangent')
 const bridgeLenCm = ref<string>('—')
 
@@ -77,8 +87,8 @@ const didInitPositions = ref(false)
 function getTableFrame() {
   const W = win.rec.width.value
   const H = win.rec.height.value
-  const idealW = tableWcm * pxPerCm.value
-  const idealH = tableHcm * pxPerCm.value
+  const idealW = tableWcm.value * pxPerCm.value
+  const idealH = tableHcm.value * pxPerCm.value
   const scale = Math.min(W / idealW, H / idealH, 1)
   const drawW = idealW * scale
   const drawH = idealH * scale
@@ -120,13 +130,11 @@ function resizeCanvas() {
 
   pockets.value = [
     { x: left,  y: top },    // 左上
-    { x: cx,    y: top },    // 上中
     { x: right, y: top },    // 右上
-    { x: left,  y: cy },     // 左中
-    { x: right, y: cy },     // 右中
     { x: left,  y: bottom }, // 左下
-    { x: cx,    y: bottom }, // 下中
     { x: right, y: bottom }, // 右下
+    { x: cx,    y: top },    // 上中
+    { x: cx,    y: bottom }, // 下中
   ]
 
   // 同步 c4 半径为口袋半径
@@ -138,7 +146,35 @@ function resizeCanvas() {
 }
 
 // ========== 约束计算 ==========
+// 计算视线的终点位置（根据模式）
+function getHitLineEndPoint() {
+  if (hitLineMode.value === 'center') {
+    // 模式1：母球圆心到目标球圆心
+    return { x: c3.position.x, y: c3.position.y }
+  } else {
+    // 模式2：母球圆心到鬼球目标球切点
+    // 鬼球的位置就是c2的位置，切点是鬼球与目标球的接触点
+    const p2 = { x: c2.position.x, y: c2.position.y } // 鬼球圆心
+    const p3 = { x: c3.position.x, y: c3.position.y } // 目标球圆心
+
+    // 鬼球与目标球的连线方向
+    const vx = p3.x - p2.x
+    const vy = p3.y - p2.y
+    const len = Math.hypot(vx, vy)
+    if (!(len > 1e-6)) return { x: c3.position.x, y: c3.position.y }
+    const ux = vx / len
+    const uy = vy / len
+
+    // 切点：鬼球圆心 + 方向向量 × 鬼球半径
+    return {
+      x: p2.x + ux * c2.radius,
+      y: p2.y + uy * c2.radius
+    }
+  }
+}
+
 function recomputeC2() {
+  // c2的计算始终基于c3→c4的反向，不受视线模式影响
   const vx = c4.position.x - c3.position.x
   const vy = c4.position.y - c3.position.y
   const len = Math.hypot(vx, vy)
@@ -178,9 +214,9 @@ watchEffect(() => {
   recomputeC2()
 })
 
-// 口袋半径改变时，重算像素半径并刷新
+// 口袋直径改变时，重算像素半径并刷新
 watchEffect(() => {
-  void pocketRcm.value
+  void pocketDiameter.value
   if (isInitialized.value) {
     resizeCanvas()
   }
@@ -190,9 +226,10 @@ watchEffect(() => {
 // 控制线段显示
 watchEffect(() => {
   cueLine.config.visible = showCueLine.value
-  hitLine.config.visible = showHitLine.value
+  hitLine.config.visible = false // 隐藏原来的hitLine，使用动态绘制
   aimLine.config.visible = showAimLine.value
   stLine.config.visible = showSTLine.value
+  pocketRayLine.config.visible = false // 隐藏原来的pocketRayLine，使用动态绘制
 })
 
 
@@ -497,16 +534,21 @@ function drawLengthLabels() {
   const s2 = win.toScreen(c2.position)
   const s3 = win.toScreen(c3.position)
   const s4 = win.toScreen(c4.position)
+  const hitEndPoint = getHitLineEndPoint()
+  const sHitEnd = win.toScreen(hitEndPoint)
 
   const l12 = lengthCm(s1, s2).cm.toFixed(1) + ' cm'
-  const l13 = lengthCm(s1, s3).cm.toFixed(1) + ' cm'
+  const lHit = lengthCm(s1, sHitEnd).cm.toFixed(1) + ' cm'
   const l34 = lengthCm(s3, s4).cm.toFixed(1) + ' cm'
-  const m12 = mid(s1, s2)
-  const m13 = mid(s1, s3)
+
+  // 蓝线长度：靠近母球的1/3位置
+  const pos12 = { x: s1.x + (s2.x - s1.x) * 0.33, y: s1.y + (s2.y - s1.y) * 0.33 }
+  // 绿线长度：靠近目标球的1/3位置
+  const posHit = { x: s1.x + (sHitEnd.x - s1.x) * 0.67, y: s1.y + (sHitEnd.y - s1.y) * 0.67 }
   const m34 = mid(s3, s4)
 
-  if (showCueLine.value) drawTextLabel(l12, m12.x, m12.y - 12)
-  if (showHitLine.value) drawTextLabel(l13, m13.x, m13.y - 12)
+  if (showCueLine.value) drawTextLabel(l12, pos12.x, pos12.y - 12)
+  if (showHitLine.value) drawTextLabel(lHit, posHit.x, posHit.y - 12)
   if (showAimLine.value) drawTextLabel(l34, m34.x, m34.y - 12)
 
   // c2-c3（虚影-目标）长度（当显示 ST 线时）
@@ -522,7 +564,8 @@ function drawCueHitAngleAtC1() {
   if (!showAngleCueHit.value) return
   const p = { x: c1.position.x, y: c1.position.y }
   const vCue = { x: c2.position.x - p.x, y: c2.position.y - p.y }
-  const vHit = { x: c3.position.x - p.x, y: c3.position.y - p.y }
+  const hitEndPoint = getHitLineEndPoint()
+  const vHit = { x: hitEndPoint.x - p.x, y: hitEndPoint.y - p.y }
   const a = angleBetween(vCue.x, vCue.y, vHit.x, vHit.y)
   const nCue = (() => {
     const L = Math.hypot(vCue.x, vCue.y); return L > 1e-6 ? { x: vCue.x / L, y: vCue.y / L } : { x: 1, y: 0 }
@@ -570,6 +613,76 @@ function drawAnglesHV() {
 
   if (showCueH) drawTextLabel(`cue∠H:${cueH.toFixed(1)}°`, s1.x + signX_cue * d, s1.y)
   if (showCueV) drawTextLabel(`cue∠V:${cueV.toFixed(1)}°`, s1.x, s1.y + signY_cue * d)
+}
+
+// 球洞射线与视线的夹角：画出橙色实线并标注角度
+function drawPocketHitAngle() {
+  if (!showPocketHitAngle.value || !showPocketRay.value || !showHitLine.value) return
+
+  const p1 = { x: c1.position.x, y: c1.position.y } // 母球
+  const p4 = { x: c4.position.x, y: c4.position.y } // 球洞
+  const hitEndPoint = getHitLineEndPoint() // 交点
+
+  // 视线方向（从交点指向母球，即视线靠母球部分）
+  const vHit = { x: p1.x - hitEndPoint.x, y: p1.y - hitEndPoint.y }
+  // 球洞射线方向（从交点沿球洞射线延长方向，即远离球洞的方向）
+  const vPocket = { x: hitEndPoint.x - p4.x, y: hitEndPoint.y - p4.y }
+
+  // 计算夹角（取小于90度的角）
+  let angle = angleBetween(vHit.x, vHit.y, vPocket.x, vPocket.y)
+  // if (angle > 90) angle = 180 - angle
+
+  // 标准化方向向量
+  const LHit = Math.hypot(vHit.x, vHit.y)
+  const LPocket = Math.hypot(vPocket.x, vPocket.y)
+  if (!(LHit > 1e-6 && LPocket > 1e-6)) return
+
+  const uhx = vHit.x / LHit, uhy = vHit.y / LHit
+  const upx = vPocket.x / LPocket, upy = vPocket.y / LPocket
+
+  // 线段长度：从交点到角度文字显示位置的距离
+  const lineLength = c3.radius * pocketAngleDistance.value
+
+  // 两条线的终点
+  const hitLineEnd = { x: hitEndPoint.x + uhx * lineLength, y: hitEndPoint.y + uhy * lineLength }
+  const pocketLineEnd = { x: hitEndPoint.x + upx * lineLength, y: hitEndPoint.y + upy * lineLength }
+
+  // 转换为屏幕坐标
+  const sCenter = win.toScreen(hitEndPoint)
+  const sHitEnd = win.toScreen(hitLineEnd)
+  const sPocketEnd = win.toScreen(pocketLineEnd)
+
+  if (!ctx) return
+
+  // 绘制两条实线
+  ctx.save()
+  ctx.strokeStyle = '#00cc00'
+  ctx.lineWidth = 2.5
+  ctx.setLineDash([])
+
+  // 视线部分
+  ctx.beginPath()
+  ctx.moveTo(sCenter.x, sCenter.y)
+  ctx.lineTo(sHitEnd.x, sHitEnd.y)
+  ctx.stroke()
+
+  // 球洞射线部分
+  ctx.beginPath()
+  ctx.moveTo(sCenter.x, sCenter.y)
+  ctx.lineTo(sPocketEnd.x, sPocketEnd.y)
+  ctx.stroke()
+
+  ctx.restore()
+
+  // 角度标注位置：显示在球洞射线上
+  const labelDistance = lineLength * 0.8 // 稍微靠近交点一些
+  const labelPos = {
+    x: hitEndPoint.x + upx * labelDistance,
+    y: hitEndPoint.y + upy * labelDistance
+  }
+
+  const sLabel = win.toScreen(labelPos)
+  drawTextLabel(`∠=${angle.toFixed(1)}°`, sLabel.x, sLabel.y)
 }
 
 // 走廊：母球到虚影两侧相切虚线，如可能擦到目标球则变红
@@ -649,23 +762,135 @@ function drawCueRay() {
   ctx.restore()
 }
 
-// 目标球切线桥/水平桥/竖直桥：在绿线与目标球的接触点处，向蓝色虚线作线段，并标注长度
+// 球洞射线：将 c4->c3 延长到画布边界
+function drawPocketRay() {
+  if (!showPocketRay.value || !ctx) return
+  const a = { x: c4.position.x, y: c4.position.y } // 球洞
+  const b = { x: c3.position.x, y: c3.position.y } // 目标球
+  const v = { x: b.x - a.x, y: b.y - a.y }
+  const L = Math.hypot(v.x, v.y)
+  if (!(L > 1e-6)) return
+  const ux = v.x / L, uy = v.y / L
+
+  // 求与画布边界交点
+  const W = win.rec.width.value, H = win.rec.height.value
+  const candidates: P[] = []
+  // 与 x=0, x=W 边界
+  if (Math.abs(ux) > 1e-8) {
+    const t1 = (0 - a.x) / ux, y1 = a.y + uy * t1
+    if (t1 > 0 && y1 >= 0 && y1 <= H) candidates.push({ x: 0, y: y1 })
+    const t2 = (W - a.x) / ux, y2 = a.y + uy * t2
+    if (t2 > 0 && y2 >= 0 && y2 <= H) candidates.push({ x: W, y: y2 })
+  }
+  // 与 y=0, y=H 边界
+  if (Math.abs(uy) > 1e-8) {
+    const t3 = (0 - a.y) / uy, x3 = a.x + ux * t3
+    if (t3 > 0 && x3 >= 0 && x3 <= W) candidates.push({ x: x3, y: 0 })
+    const t4 = (H - a.y) / uy, x4 = a.x + ux * t4
+    if (t4 > 0 && x4 >= 0 && x4 <= W) candidates.push({ x: x4, y: H })
+  }
+  // 选择最近的前向交点
+  let end: P | null = null
+  let bestT = Infinity
+  for (const p of candidates) {
+    const t = (Math.abs(ux) > Math.abs(uy))
+      ? (p.x - a.x) / ux
+      : (p.y - a.y) / uy
+    if (t > 0 && t < bestT) { bestT = t; end = p }
+  }
+  if (!end) return
+  const sA = win.toScreen(a)
+  const sE = win.toScreen(end)
+  if (!ctx) return
+  ctx.save()
+  ctx.strokeStyle = '#bbbbbb'
+  ctx.lineWidth = 1
+  ctx.setLineDash([4, 4])
+  ctx.beginPath()
+  ctx.moveTo(sA.x, sA.y)
+  ctx.lineTo(sE.x, sE.y)
+  ctx.stroke()
+  ctx.restore()
+}
+
+
+// 目标球切线桥/水平桥/竖直桥：在视线与目标球的接触点处，向蓝色虚线作线段，并标注长度
 function drawTangentBridge() {
   if (!ctx) return
   if (!c2.config.visible) { bridgeLenCm.value = '—'; return }
 
   const p1 = { x: c1.position.x, y: c1.position.y } // 母球
   const p2 = { x: c2.position.x, y: c2.position.y } // 虚影
-  const p3 = { x: c3.position.x, y: c3.position.y } // 目标球
+  const p4 = { x: c4.position.x, y: c4.position.y } // 球洞
+  const hitEndPoint = getHitLineEndPoint() // 视线终点
 
-  // 绿线方向（c1 -> c3）
-  const vHit = { x: p3.x - p1.x, y: p3.y - p1.y }
+  // 特殊算法：球洞射线模式（仅在ghost模式下可用）
+  if (bridgeMode.value === 'pocket_ray' && hitLineMode.value === 'ghost') {
+    const ghostContact = hitEndPoint // 鬼球切点
+
+    // 球洞射线方向（c4 -> ghostContact）
+    const vPocket = { x: ghostContact.x - p4.x, y: ghostContact.y - p4.y }
+    const Lp = Math.hypot(vPocket.x, vPocket.y)
+    if (!(Lp > 1e-6)) { bridgeLenCm.value = '—'; return }
+    const up = { x: vPocket.x / Lp, y: vPocket.y / Lp }
+
+    // 瞄准线方向（c1 -> c2）
+    const vCue = { x: p2.x - p1.x, y: p2.y - p1.y }
+    const Lc = Math.hypot(vCue.x, vCue.y)
+    if (!(Lc > 1e-6)) { bridgeLenCm.value = '—'; return }
+    const uc = { x: vCue.x / Lc, y: vCue.y / Lc }
+
+    // 计算球洞射线与瞄准线的交点
+    const cross2 = (ax: number, ay: number, bx: number, by: number) => ax * by - ay * bx
+    const denom = cross2(up.x, up.y, uc.x, uc.y)
+    if (Math.abs(denom) <= 1e-8) { bridgeLenCm.value = '—'; return } // 平行
+
+    const diff = { x: p1.x - p4.x, y: p1.y - p4.y }
+    const t = cross2(diff.x, diff.y, uc.x, uc.y) / denom
+    const intersection = { x: p4.x + up.x * t, y: p4.y + up.y * t }
+
+    // 计算鬼球切点到交点的距离
+    const distance = Math.hypot(intersection.x - ghostContact.x, intersection.y - ghostContact.y)
+    const distanceCm = distance / Math.max(0.0001, pxPerCm.value)
+
+    // 绘制线段
+    const sA = win.toScreen(ghostContact)
+    const sB = win.toScreen(intersection)
+
+    ctx.save()
+    ctx.strokeStyle = '#06b6d4'
+    ctx.lineWidth = 1.5
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(sA.x, sA.y)
+    ctx.lineTo(sB.x, sB.y)
+    ctx.stroke()
+    ctx.restore()
+
+    const l = distanceCm.toFixed(1) + ' cm'
+    bridgeLenCm.value = l
+    const m = mid(sA, sB)
+    drawTextLabel(l, m.x, m.y - 12)
+    return
+  }
+
+  // 通用算法：切线/水平/竖直模式
+  // 视线方向（c1 -> hitEndPoint）
+  const vHit = { x: hitEndPoint.x - p1.x, y: hitEndPoint.y - p1.y }
   const Lh = Math.hypot(vHit.x, vHit.y)
   if (!(Lh > 1e-6)) { bridgeLenCm.value = '—'; return }
   const uh = { x: vHit.x / Lh, y: vHit.y / Lh }
 
-  // 绿线与目标球的接触点（靠近 c1）
-  const contact = { x: p3.x - uh.x * c3.radius, y: p3.y - uh.y * c3.radius }
+  // 计算接触点
+  let contact: P
+  if (hitLineMode.value === 'center') {
+    // Center模式：视线与目标球的接触点（靠近 c1）
+    const p3 = { x: c3.position.x, y: c3.position.y }
+    contact = { x: p3.x - uh.x * c3.radius, y: p3.y - uh.y * c3.radius }
+  } else {
+    // Ghost模式：接触点就是视线终点（鬼球切点）
+    contact = hitEndPoint
+  }
 
   // 蓝色虚线方向（c1 -> c2）
   const vCue = { x: p2.x - p1.x, y: p2.y - p1.y }
@@ -674,7 +899,7 @@ function drawTangentBridge() {
   const uc = { x: vCue.x / Lc, y: vCue.y / Lc }
 
   // 根据模式选择桥线方向
-  let dir = { x: -uh.y, y: uh.x } // 切线：垂直绿线
+  let dir = { x: -uh.y, y: uh.x } // 切线：垂直视线
   if (bridgeMode.value === 'horizontal') dir = { x: 1, y: 0 }
   if (bridgeMode.value === 'vertical')   dir = { x: 0, y: 1 }
 
@@ -692,8 +917,9 @@ function drawTangentBridge() {
   const sB = win.toScreen(inter)
 
   ctx.save()
-  ctx.strokeStyle = '#06b6d4'
-  ctx.lineWidth = 1.5
+  // ctx.strokeStyle = '#06b6d4'
+  ctx.strokeStyle = '#00ff00'
+  ctx.lineWidth = 2.5
   ctx.setLineDash([])
   ctx.beginPath()
   ctx.moveTo(sA.x, sA.y)
@@ -707,6 +933,262 @@ function drawTangentBridge() {
   drawTextLabel(l, m.x, m.y - 12)
 }
 
+// 绘制动态视线（根据模式）
+function drawDynamicHitLine() {
+  if (!showHitLine.value || !ctx) return
+
+  const p1 = { x: c1.position.x, y: c1.position.y } // 母球圆心
+  const endPoint = getHitLineEndPoint()
+
+  const s1 = win.toScreen(p1)
+  const s2 = win.toScreen(endPoint)
+
+  ctx.save()
+  ctx.strokeStyle = '#22c55e'
+  ctx.lineWidth = 1
+  ctx.setLineDash([])
+  ctx.beginPath()
+  ctx.moveTo(s1.x, s1.y)
+  ctx.lineTo(s2.x, s2.y)
+  ctx.stroke()
+  ctx.restore()
+}
+
+// 角度-偏移函数图像
+function drawAngleOffsetChart() {
+  if (false) return // 暂时隐藏，未来版本再开启
+  if (!ctx) return
+
+  // 图表位置和尺寸（移到右上角）
+  const canvasW = win.rec.width.value
+  const chartW = 200
+  const chartH = 150
+  const chartX = canvasW - chartW - 20
+  const chartY = 20
+
+  // 背景
+  ctx.save()
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+  ctx.strokeStyle = '#333'
+  ctx.lineWidth = 1
+  ctx.fillRect(chartX, chartY, chartW, chartH)
+  ctx.strokeRect(chartX, chartY, chartW, chartH)
+
+  // 坐标轴
+  ctx.strokeStyle = '#666'
+  ctx.lineWidth = 1
+  ctx.setLineDash([])
+
+  // X轴（角度：0-180度）
+  ctx.beginPath()
+  ctx.moveTo(chartX, chartY + chartH)
+  ctx.lineTo(chartX + chartW, chartY + chartH)
+  ctx.stroke()
+
+  // Y轴（偏移：固定范围0-20cm）
+  ctx.beginPath()
+  ctx.moveTo(chartX, chartY)
+  ctx.lineTo(chartX, chartY + chartH)
+  ctx.stroke()
+
+  // 获取当前角度和偏移
+  const currentAngle = getCurrentAngle()
+  const currentOffset = getCurrentOffset()
+
+  // 固定的Y轴范围
+  const maxOffset = 20 // 固定最大偏移20cm
+
+  if (currentAngle !== null && currentOffset !== null) {
+    // 使用稳定角度计算函数关系，避免小角度误差
+    const stableAngle = 45 // 使用45度作为参考角度，避免小角度的计算误差
+    const stableOffset = getOffsetAtAngle(stableAngle)
+
+    // 绘制函数曲线
+    ctx.strokeStyle = '#3b82f6'
+    ctx.lineWidth = 2
+    ctx.setLineDash([])
+    ctx.beginPath()
+
+    for (let angle = 0; angle <= 180; angle += 2) {
+      let offset = 0
+      if (angle > 0 && angle < 180 && stableOffset !== null) {
+        // 基于稳定角度的比例关系计算
+        const ratio = stableOffset / Math.sin((stableAngle * Math.PI) / 180)
+        offset = Math.sin((angle * Math.PI) / 180) * ratio
+      }
+
+      const x = chartX + (angle / 180) * chartW
+      const y = chartY + chartH - (offset / maxOffset) * chartH
+
+      if (angle === 0) ctx.moveTo(x, y)
+      else ctx.lineTo(x, y)
+    }
+    ctx.stroke()
+
+    // 当前状态点
+    const currentX = chartX + (currentAngle / 180) * chartW
+    const currentY = chartY + chartH - (currentOffset / maxOffset) * chartH
+
+    // 绘制当前点
+    ctx.fillStyle = '#ef4444'
+    ctx.beginPath()
+    ctx.arc(currentX, currentY, 4, 0, 2 * Math.PI)
+    ctx.fill()
+
+    // 虚线到坐标轴
+    ctx.strokeStyle = '#ef4444'
+    ctx.lineWidth = 1
+    ctx.setLineDash([3, 3])
+
+    // 到X轴的虚线
+    ctx.beginPath()
+    ctx.moveTo(currentX, currentY)
+    ctx.lineTo(currentX, chartY + chartH)
+    ctx.stroke()
+
+    // 到Y轴的虚线
+    ctx.beginPath()
+    ctx.moveTo(currentX, currentY)
+    ctx.lineTo(chartX, currentY)
+    ctx.stroke()
+
+    // 标注数值
+    ctx.fillStyle = '#333'
+    ctx.font = '10px Arial'
+    ctx.textAlign = 'center'
+    ctx.fillText(`${currentAngle.toFixed(1)}°`, currentX, chartY + chartH + 12)
+
+    ctx.textAlign = 'right'
+    ctx.fillText(`${currentOffset.toFixed(1)}cm`, chartX - 5, currentY + 3)
+  }
+
+  // 添加刻度标记
+  ctx.strokeStyle = '#999'
+  ctx.lineWidth = 1
+  ctx.setLineDash([])
+  ctx.font = '9px Arial'
+  ctx.fillStyle = '#666'
+
+  // X轴刻度（每30度一个刻度）
+  for (let angle = 0; angle <= 180; angle += 30) {
+    const x = chartX + (angle / 180) * chartW
+    ctx.beginPath()
+    ctx.moveTo(x, chartY + chartH)
+    ctx.lineTo(x, chartY + chartH - 5)
+    ctx.stroke()
+
+    ctx.textAlign = 'center'
+    ctx.fillText(`${angle}°`, x, chartY + chartH + 15)
+  }
+
+  // Y轴刻度（每5cm一个刻度）
+  for (let offset = 0; offset <= 20; offset += 5) {
+    const y = chartY + chartH - (offset / 20) * chartH
+    ctx.beginPath()
+    ctx.moveTo(chartX, y)
+    ctx.lineTo(chartX + 5, y)
+    ctx.stroke()
+
+    ctx.textAlign = 'right'
+    ctx.fillText(`${offset}`, chartX - 3, y + 3)
+  }
+
+  // 坐标轴标签
+  ctx.fillStyle = '#333'
+  ctx.font = '12px Arial'
+  ctx.textAlign = 'center'
+  ctx.fillText('角度 (°)', chartX + chartW / 2, chartY + chartH + 30)
+
+  ctx.save()
+  ctx.translate(chartX - 35, chartY + chartH / 2)
+  ctx.rotate(-Math.PI / 2)
+  ctx.textAlign = 'center'
+  ctx.fillText('偏移 (cm)', 0, 0)
+  ctx.restore()
+
+  ctx.restore()
+}
+
+// 获取当前角度
+function getCurrentAngle(): number | null {
+  if (!showPocketHitAngle.value || !showPocketRay.value || !showHitLine.value) return null
+
+  const p1 = { x: c1.position.x, y: c1.position.y }
+  const p4 = { x: c4.position.x, y: c4.position.y }
+  const hitEndPoint = getHitLineEndPoint()
+
+  const vHit = { x: p1.x - hitEndPoint.x, y: p1.y - hitEndPoint.y }
+  const vPocket = { x: hitEndPoint.x - p4.x, y: hitEndPoint.y - p4.y }
+
+  let angle = angleBetween(vHit.x, vHit.y, vPocket.x, vPocket.y)
+  // if (angle > 90) angle = 180 - angle
+
+  return angle
+}
+
+// 获取当前偏移
+function getCurrentOffset(): number | null {
+  const bridgeStr = bridgeLenCm.value
+  if (bridgeStr === '—') return null
+
+  const match = bridgeStr.match(/([0-9.]+)/)
+  return match ? parseFloat(match[1]) : null
+}
+
+// 计算指定角度下的偏移量（用于函数曲线计算）
+function getOffsetAtAngle(targetAngle: number): number | null {
+  // 临时保存当前状态
+  const originalC1 = { x: c1.position.x, y: c1.position.y }
+  const originalC3 = { x: c3.position.x, y: c3.position.y }
+  const originalC4 = { x: c4.position.x, y: c4.position.y }
+
+  try {
+    // 设置一个标准配置来计算指定角度的偏移
+    const p4 = { x: c4.position.x, y: c4.position.y } // 球洞位置保持不变
+    const hitEndPoint = getHitLineEndPoint() // 当前交点
+
+    // 计算目标角度对应的母球位置
+    // 基于当前的几何关系，调整母球位置使角度为targetAngle
+    const vPocket = { x: hitEndPoint.x - p4.x, y: hitEndPoint.y - p4.y }
+    const LPocket = Math.hypot(vPocket.x, vPocket.y)
+    if (!(LPocket > 1e-6)) return null
+
+    const upx = vPocket.x / LPocket, upy = vPocket.y / LPocket
+
+    // 计算目标角度对应的视线方向
+    const targetAngleRad = (targetAngle * Math.PI) / 180
+    const cosAngle = Math.cos(targetAngleRad)
+    const sinAngle = Math.sin(targetAngleRad)
+
+    // 通过旋转球洞射线方向得到视线方向
+    const vHitX = upx * cosAngle - upy * sinAngle
+    const vHitY = upx * sinAngle + upy * cosAngle
+
+    // 设置临时母球位置
+    const distance = Math.hypot(hitEndPoint.x - originalC1.x, hitEndPoint.y - originalC1.y)
+    c1.moveTo(hitEndPoint.x + vHitX * distance, hitEndPoint.y + vHitY * distance)
+
+    // 重新计算c2
+    recomputeC2()
+
+    // 计算这个配置下的偏移
+    const tempBridgeStr = bridgeLenCm.value
+    let result: number | null = null
+    if (tempBridgeStr !== '—') {
+      const match = tempBridgeStr.match(/([0-9.]+)/)
+      result = match ? parseFloat(match[1]) : null
+    }
+
+    return result
+  } finally {
+    // 恢复原始状态
+    c1.moveTo(originalC1.x, originalC1.y)
+    c3.moveTo(originalC3.x, originalC3.y)
+    c4.moveTo(originalC4.x, originalC4.y)
+    recomputeC2()
+  }
+}
+
 function drawOverlays() {
   if (!ctx) return
   // 过母球的水平/竖直虚线
@@ -715,12 +1197,20 @@ function drawOverlays() {
   if (c2.config.visible) drawCorridor()
   // 发射射线
   drawCueRay()
-  // 目标球切线桥
+  // 球洞射线
+  drawPocketRay()
+  // 动态视线（替代原来的hitLine）
+  drawDynamicHitLine()
+  // 球洞射线与视线夹角（角度实线，在瞄准偏移之前绘制）
+  drawPocketHitAngle()
+  // 目标球切线桥（瞄准偏移，在角度实线之上）
   drawTangentBridge()
   // 长度与角度标注
   drawLengthLabels()
   drawCueHitAngleAtC1()
   drawAnglesHV()
+  // 函数图像
+  // drawAngleOffsetChart()
 }
 
 // 动画渲染循环
@@ -757,6 +1247,7 @@ onMounted(() => {
   lineLayer.addEntity(cueLine)
   lineLayer.addEntity(hitLine)
   lineLayer.addEntity(stLine)
+  lineLayer.addEntity(pocketRayLine)
 
   // 圆在上层（调整 z 使圆覆盖线）
   ;[c1, c2, c3, c4].forEach((c, i) => {
@@ -819,8 +1310,9 @@ onBeforeUnmount(() => {
       <h2>台球几何约束演示</h2>
       <p class="hint">
         约束：r1 = r2 = r；并单独让 r3 = r。动态计算 c2，使 c2、c3、c4 三点共线且 c2 与 c3 外切。<br>
-        鼠标：拖动母球(c1)/目标球(c3)；点击 8 个洞选择目标洞(c4)。<br>
-        点击移动模式：先点击球选中，再点击空白处移动。侧栏可精确控制球位置。
+        鼠标：拖动母球(c1)/目标球(c3)；点击 6 个洞选择目标洞(c4)。<br>
+        点击移动模式：先点击球选中，再点击空白处移动。侧栏可精确控制球位置。<br>
+        新功能：球洞射线显示球洞到目标球的射线，并计算与视线的夹角。
       </p>
 
       <div class="grid">
@@ -895,23 +1387,45 @@ onBeforeUnmount(() => {
           <label><input type="checkbox" v-model="showHitLine" /> hit(c1→c3)</label>
           <label><input type="checkbox" v-model="showAimLine" /> aim(c3→c4)</label>
           <label><input type="checkbox" v-model="showSTLine" /> shadow-target(c2→c3)</label>
+          <label><input type="checkbox" v-model="showPocketRay" /> 球洞射线(c4→c3)</label>
           <label><input type="checkbox" v-model="showCueRay" /> cue 射线</label>
           <label><input type="checkbox" v-model="showCorridor" /> 走廊</label>
           <label><input type="checkbox" v-model="showCrossGuides" /> 十字参考线</label>
           <label><input type="checkbox" v-model="showLengths" /> 长度标注</label>
-          <label><input type="checkbox" v-model="showAngleCueHit" /> ∠(cue,hit)</label>
-          <label><input type="checkbox" v-model="showAngleHV" /> 与水平/竖直角度</label>
+          <label><input type="checkbox" v-model="showAngleCueHit" /> ∠(瞄准线,视线)</label>
+          <label><input type="checkbox" v-model="showAngleHV" /> ∠(瞄准线,十字线)</label>
+          <label><input type="checkbox" v-model="showPocketHitAngle" /> ∠(球洞线,视线)</label>
         </fieldset>
 
         <fieldset>
           <legend>角度标注偏移</legend>
           <label>
-            ×r
+            水平/竖直角度 ×r
             <input type="range" min="0.5" max="16" step="0.1" v-model.number="hvOffsetMul" />
           </label>
           <label>
             倍数
             <input type="number" min="0.5" max="6" step="0.1" v-model.number="hvOffsetMul" />
+          </label>
+          <label>
+            球洞射线角度 ×r
+            <input type="range" min="1" max="10" step="0.1" v-model.number="pocketAngleDistance" />
+          </label>
+          <label>
+            倍数
+            <input type="number" min="1" max="10" step="0.1" v-model.number="pocketAngleDistance" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>视线生成逻辑</legend>
+          <label>
+            <input type="radio" value="center" v-model="hitLineMode" />
+            母球圆心 → 目标球圆心
+          </label>
+          <label>
+            <input type="radio" value="ghost" v-model="hitLineMode" />
+            母球圆心 → 鬼球切点
           </label>
         </fieldset>
 
@@ -923,15 +1437,19 @@ onBeforeUnmount(() => {
           </label>
           <label>
             <input type="radio" value="tangent" v-model="bridgeMode" />
-            切线（垂直绿线）
+            切线（垂直视线）
           </label>
           <label>
             <input type="radio" value="horizontal" v-model="bridgeMode" />
-            水平线（过切点）
+            水平线（过{{ hitLineMode === 'center' ? '切点' : '鬼球切点' }}）
           </label>
           <label>
             <input type="radio" value="vertical" v-model="bridgeMode" />
-            竖直线（过切点）
+            竖直线（过{{ hitLineMode === 'center' ? '切点' : '鬼球切点' }}）
+          </label>
+          <label v-if="hitLineMode === 'ghost'">
+            <input type="radio" value="pocket_ray" v-model="bridgeMode" />
+            球洞射线（鬼球切点沿球洞射线到瞄准线）
           </label>
         </fieldset>
 
@@ -947,21 +1465,39 @@ onBeforeUnmount(() => {
           </label>
 
           <label>
-            球半径 r(cm)
-            <input type="range" min="1" max="4" step="0.1" v-model.number="r" />
+            台球桌长度(cm)
+            <input type="range" min="200" max="400" step="5" v-model.number="tableWcm" />
           </label>
           <label>
-            r(cm)
-            <input type="number" min="1" step="0.1" v-model.number="r" />
+            长度(cm)
+            <input type="number" min="200" max="400" step="5" v-model.number="tableWcm" />
           </label>
 
           <label>
-            口袋半径(cm)
-            <input type="range" min="3" max="10" step="0.2" v-model.number="pocketRcm" />
+            台球桌宽度(cm)
+            <input type="range" min="100" max="200" step="5" v-model.number="tableHcm" />
           </label>
           <label>
-            口袋半径(cm)
-            <input type="number" min="3" max="10" step="0.1" v-model.number="pocketRcm" />
+            宽度(cm)
+            <input type="number" min="100" max="200" step="5" v-model.number="tableHcm" />
+          </label>
+
+          <label>
+            球直径(cm)
+            <input type="range" min="4" max="8" step="0.2" v-model.number="ballDiameter" />
+          </label>
+          <label>
+            直径(cm)
+            <input type="number" min="4" max="8" step="0.1" v-model.number="ballDiameter" />
+          </label>
+
+          <label>
+            口袋直径(cm)
+            <input type="range" min="6" max="20" step="0.4" v-model.number="pocketDiameter" />
+          </label>
+          <label>
+            直径(cm)
+            <input type="number" min="6" max="20" step="0.2" v-model.number="pocketDiameter" />
           </label>
 
           <button type="button" class="btn" @click="resetAll">重置</button>
@@ -1015,7 +1551,7 @@ onBeforeUnmount(() => {
 }
 .grid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 fieldset {
