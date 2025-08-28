@@ -27,7 +27,7 @@ const pxPerCm = ref(6.0) // 默认 6 px/cm
 const ballDiameter = ref(ballRadiusCm * 2) // cm，直径
 const r = computed(() => ballDiameter.value / 2) // cm，半径
 // 口袋直径设置，半径通过计算得出
-const pocketDiameter = ref(pocketRadiusCm * 2) // cm，直径
+const pocketDiameter = ref(8.5) // cm，直径，缺省8.5cm
 const pocketRcm = computed(() => pocketDiameter.value / 2) // cm，半径
 
 // 添加初始化完成标志（需要在watchEffect之前定义）
@@ -230,8 +230,11 @@ function drawFrontView() {
   const centerX = size / 2
   const centerY = size / 2
 
-  // 固定比例：每厘米对应多少像素（避免边界问题）
-  const cmToPixel = 8  // 每厘米8像素，可以显示±10cm的范围
+  // 动态比例：左右各留球直径向上取整的空间
+  const ballDiameterCm = ballDiameter.value
+  const marginCm = Math.ceil(ballDiameterCm) // 向上取整
+  const viewWidthCm = ballDiameterCm + 2 * marginCm // 球直径 + 左右各留margin
+  const cmToPixel = size / viewWidthCm  // 动态计算每厘米对应的像素
 
   // 球半径：按实际球半径（厘米）× 像素比例
   const ballRadius = r.value * cmToPixel  // 实际球半径转换为像素
@@ -780,10 +783,11 @@ function resizeCanvas() {
   const { drawW, drawH, offX, offY, scale, cx, cy } = getTableFrame()
   const mPx = cushionMarginCm * pxPerCm.value * scale
   const prPx = pocketRcm.value * pxPerCm.value * scale
-  const left = offX + mPx
-  const right = offX + drawW - mPx
-  const top = offY + mPx
-  const bottom = offY + drawH - mPx
+  // 袋口直径位置画到桌子的边缘
+  const left = offX
+  const right = offX + drawW
+  const top = offY
+  const bottom = offY + drawH
 
   pockets.value = [
     { x: left,  y: top },    // 左上
@@ -2303,7 +2307,7 @@ onBeforeUnmount(() => {
     background: #ffffff;
   }
   .fv-cvs {
-    width: 160px; height: 160px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
+    width: 200px; height: 200px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
   }
   .fv-labels { font-size: 12px; color: #111827; display: grid; grid-template-columns: 1fr; gap: 2px; }
 
