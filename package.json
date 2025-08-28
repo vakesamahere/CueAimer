@@ -1,7 +1,16 @@
 {
-  "name": "site",
-  "version": "0.0.0",
-  "private": true,
+  "name": "cue-aimer",
+  "version": "1.0.0",
+  "description": "Interactive billiards aiming geometry demonstration tool built with Vue 3",
+  "author": "vakesamahere",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vakesamahere/CueAimer.git"
+  },
+  "homepage": "https://github.com/vakesamahere/CueAimer",
+  "keywords": ["billiards", "pool", "geometry", "aiming", "vue3", "canvas"],
+  "private": false,
   "type": "module",
   "engines": {
     "node": ">=18.12.0"
