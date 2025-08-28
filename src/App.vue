@@ -289,6 +289,39 @@ function drawFrontView() {
   drawDot(ghostX, centerY, '#dc2626', 4)         // 鬼球切点投影（红色）
   drawDot(corridorX, centerY, '#6b7280', 4)      // 走廊中心线投影（灰色）
 
+  // 为灰色点添加边缘指示器
+  // 计算灰色点到球心的距离
+  const corridorDistanceFromCenter = Math.abs(corridorX - centerX)
+
+  // 只有当灰色点在球内部或球面上时，才绘制边缘指示点
+  if (corridorDistanceFromCenter <= ballRadius) {
+    // 计算从灰色点垂直向下到球体边缘的交点
+    // 使用圆的方程：(x-centerX)² + (y-centerY)² = ballRadius²
+    // 已知 x = corridorX，求 y
+    const dx = corridorX - centerX
+    const discriminant = ballRadius * ballRadius - dx * dx
+
+    if (discriminant >= 0) {
+      // 计算从灰色点垂直向下到球体下边缘的交点
+      const dy = Math.sqrt(discriminant)
+      const edgeYBottom = centerY + dy // 下边缘
+
+      // 绘制下边缘指示点（灰色点的正下方）
+      drawDot(corridorX, edgeYBottom, '#6b7280', 3)
+
+      // 可选：绘制连接线显示投影关系
+      ctx2.save()
+      ctx2.strokeStyle = 'rgba(107, 114, 128, 0.4)' // 半透明灰色
+      ctx2.lineWidth = 1
+      ctx2.setLineDash([2, 2]) // 小虚线
+      ctx2.beginPath()
+      ctx2.moveTo(corridorX, centerY)
+      ctx2.lineTo(corridorX, edgeYBottom)
+      ctx2.stroke()
+      ctx2.restore()
+    }
+  }
+
   // 画投影基准线（水平虚线）
   ctx2.save()
   ctx2.strokeStyle = 'rgba(0,0,0,0.2)'
