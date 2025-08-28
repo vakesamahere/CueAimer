@@ -60,16 +60,673 @@ const showAngleCueHit = ref(false)
 const showAngleHV = ref(false)
 const showLengths = ref(false)
 const showPocketHitAngle = ref(true) // 显示球洞射线与视线的夹角
+const showCenterOffset = ref(true) // 显示目标球中心点相对走廊中心线的偏移标注
 const hvOffsetMul = ref(6) // 与水平/竖直角度标注距交点的倍数（×球半径）
 const pocketAngleDistance = ref(3) // 球洞射线角度标注距离交点的倍数（×球半径）
 // 视线生成逻辑
 type HitLineMode = 'center' | 'ghost'
-const hitLineMode = ref<HitLineMode>('ghost')
+const hitLineMode = ref<HitLineMode>('center')
 
 // 关键偏移桥模式与读数
 type BridgeMode = 'tangent' | 'horizontal' | 'vertical' | 'pocket_ray'
 const bridgeMode = ref<BridgeMode>('tangent')
 const bridgeLenCm = ref<string>('—')
+
+// 进球偏移：相对走廊中心线（c1→c2）的有符号垂距
+const entryOffsetCm = ref<string>('—')
+const centerOffsetCm = ref<string>('—')
+
+// 走廊中心线：取瞄准蓝线 c1→c2 的无限延长线
+function getCueCorridorLine(): { A: P; dir: P } | null {
+  const ax = c1.position.x, ay = c1.position.y
+  const bx = c2.position.x, by = c2.position.y
+  const vx = bx - ax, vy = by - ay
+  const L = Math.hypot(vx, vy)
+  if (!(L > 1e-6)) return null
+  return { A: { x: ax, y: ay }, dir: { x: vx / L, y: vy / L } }
+}
+
+// 目标球“进球点”：袋口→目标球中心线与目标球圆的交点（靠近袋口的一侧）
+function getObjectEntryPoint(): P {
+  const ox = c3.position.x, oy = c3.position.y
+  const px = c4.position.x, py = c4.position.y
+  const vx = ox - px, vy = oy - py
+  const L = Math.hypot(vx, vy)
+  if (!(L > 1e-6)) return { x: ox, y: oy }
+  const ux = vx / L, uy = vy / L
+  // 靠袋口一侧的球面点
+  return { x: ox - ux * c3.radius, y: oy - uy * c3.radius }
+}
+
+// 点到直线（A, dir）的有符号垂距（像素）：cross(dir, pt - A)
+function signedPerpDistanceToLine(pt: P, A: P, dir: P): number {
+  return dir.x * (pt.y - A.y) - dir.y * (pt.x - A.x)
+}
+
+function updateOffsets() {
+  entryOffsetCm.value = '—'
+  centerOffsetCm.value = '—'
+
+  // 使用与正视图相同的计算方式
+  const projData = getFrontViewProjections()
+  if (!projData) return
+
+  const { ghostContactProj, corridorProj } = projData
+
+  // 转换为厘米（与正视图完全相同的计算）
+  const entryOffsetCmValue = Math.abs(ghostContactProj) / Math.max(0.0001, pxPerCm.value)
+  const centerOffsetCmValue = Math.abs(corridorProj) / Math.max(0.0001, pxPerCm.value)
+
+  entryOffsetCm.value = `${entryOffsetCmValue.toFixed(1)} cm`
+  centerOffsetCm.value = `${centerOffsetCmValue.toFixed(1)} cm`
+}
+
+// 正视图/读数：数值缓存（像素/角度）
+const entryOffsetPx = ref<number | null>(null)
+const centerOffsetPx = ref<number | null>(null)
+const currentAngleDeg = ref<number | null>(null)
+// 偏离中心的厘米数
+const ghostOffsetCm = ref<number | null>(null)
+const corridorOffsetCm = ref<number | null>(null)
+
+// 俯视图放大镜
+const topViewCanvasRef = ref<HTMLCanvasElement | null>(null)
+let topViewCtx: CanvasRenderingContext2D | null = null
+const zoomLevel = ref<number>(2)  // 放大倍率，默认2倍
+
+// 正视图 canvas
+const fvCanvasRef = ref<HTMLCanvasElement | null>(null)
+let fvCtx: CanvasRenderingContext2D | null = null
+
+// 计算正视图投影：过目标球圆心做视线的垂线作为投影基准线
+function getFrontViewProjections(): { ghostContactProj: number; corridorProj: number } | null {
+  const c1Pos = { x: c1.position.x, y: c1.position.y }
+  const c3Pos = { x: c3.position.x, y: c3.position.y }
+  const c2Pos = { x: c2.position.x, y: c2.position.y }
+
+  // 视线方向（母球→目标球）
+  const vHit = { x: c3Pos.x - c1Pos.x, y: c3Pos.y - c1Pos.y }
+  const LHit = Math.hypot(vHit.x, vHit.y)
+  if (!(LHit > 1e-6)) return null
+  const uHit = { x: vHit.x / LHit, y: vHit.y / LHit }
+
+  // 投影基准线：过目标球圆心，垂直于视线的直线
+  const perpDir = { x: -uHit.y, y: uHit.x }  // 垂直方向
+
+  // 1. 鬼球切点：鬼球圆心 + 方向向量 × 鬼球半径（朝向目标球）
+  const vGhost = { x: c3Pos.x - c2Pos.x, y: c3Pos.y - c2Pos.y }
+  const LGhost = Math.hypot(vGhost.x, vGhost.y)
+  let ghostContact: { x: number; y: number }
+  if (LGhost > 1e-6) {
+    const uGhost = { x: vGhost.x / LGhost, y: vGhost.y / LGhost }
+    ghostContact = { x: c2Pos.x + uGhost.x * c2.radius, y: c2Pos.y + uGhost.y * c2.radius }
+  } else {
+    ghostContact = c2Pos
+  }
+
+  // 2. 走廊中心线与投影基准线的交点
+  // 走廊中心线方向：c1 → c2
+  const vCorridor = { x: c2Pos.x - c1Pos.x, y: c2Pos.y - c1Pos.y }
+  const LCorridor = Math.hypot(vCorridor.x, vCorridor.y)
+  if (!(LCorridor > 1e-6)) {
+    return {
+      ghostContactProj: 0,
+      corridorProj: 0
+    }
+  }
+  const uCorridor = { x: vCorridor.x / LCorridor, y: vCorridor.y / LCorridor }
+
+  // 计算走廊中心线与投影基准线的交点
+  // 投影基准线：过c3Pos，方向perpDir
+  // 走廊中心线：过c1Pos，方向uCorridor
+  // 求交点：c1Pos + t*uCorridor = c3Pos + s*perpDir
+  const cross2D = (a: {x: number, y: number}, b: {x: number, y: number}) => a.x * b.y - a.y * b.x
+  const denom = cross2D(uCorridor, perpDir)
+
+  let corridorIntersection: { x: number; y: number }
+  if (Math.abs(denom) > 1e-8) {
+    // 有交点
+    const diff = { x: c3Pos.x - c1Pos.x, y: c3Pos.y - c1Pos.y }
+    const t = cross2D(diff, perpDir) / denom
+    corridorIntersection = { x: c1Pos.x + t * uCorridor.x, y: c1Pos.y + t * uCorridor.y }
+  } else {
+    // 平行，取c1在投影基准线上的投影点
+    corridorIntersection = c1Pos
+  }
+
+  // 投影到基准线：点到基准线的有符号距离
+  const projectToBaseLine = (pt: { x: number; y: number }) => {
+    const diff = { x: pt.x - c3Pos.x, y: pt.y - c3Pos.y }
+    return diff.x * perpDir.x + diff.y * perpDir.y
+  }
+
+  return {
+    ghostContactProj: projectToBaseLine(ghostContact),
+    corridorProj: projectToBaseLine(corridorIntersection)
+  }
+}
+
+function drawFrontView() {
+  const cvs = fvCanvasRef.value
+  if (!cvs) return
+  if (!fvCtx) fvCtx = cvs.getContext('2d')
+  if (!fvCtx) return
+
+  // 尺寸与清屏（CSS像素）- 确保正方形比例
+  const size = 160
+  if (cvs.width !== size || cvs.height !== size) {
+    cvs.width = size; cvs.height = size
+  }
+  const ctx2 = fvCtx
+  ctx2.clearRect(0, 0, size, size)
+
+  // 取投影数据（恢复原始的正视图计算方式）
+  const projData = getFrontViewProjections()
+  if (!projData) return
+
+  const { ghostContactProj, corridorProj } = projData
+
+  // 固定球在中心
+  const centerX = size / 2
+  const centerY = size / 2
+
+  // 固定比例：每厘米对应多少像素（避免边界问题）
+  const cmToPixel = 8  // 每厘米8像素，可以显示±10cm的范围
+
+  // 球半径：按实际球半径（厘米）× 像素比例
+  const ballRadius = r.value * cmToPixel  // 实际球半径转换为像素
+
+  // 计算各点的屏幕坐标（y=centerY，x根据投影距离计算）
+  const ghostProjCm = ghostContactProj / Math.max(0.0001, pxPerCm.value)  // 转换为厘米
+  const corridorProjCm = corridorProj / Math.max(0.0001, pxPerCm.value)   // 转换为厘米
+
+  const ghostX = centerX + ghostProjCm * cmToPixel
+  const corridorX = centerX + corridorProjCm * cmToPixel
+
+  // 更新厘米偏移缓存
+  ghostOffsetCm.value = ghostProjCm
+  corridorOffsetCm.value = corridorProjCm
+
+  // 画目标球（正视图圆盘），圆心在“中心点”的位置
+  // 画目标球（固定在中心）
+  ctx2.save()
+  const grad = ctx2.createRadialGradient(
+    centerX - ballRadius * 0.3, centerY - ballRadius * 0.3, ballRadius * 0.2,
+    centerX, centerY, ballRadius
+  )
+  grad.addColorStop(0, '#8be9e6')
+  grad.addColorStop(1, '#4fd1c5')
+  ctx2.fillStyle = grad
+  ctx2.beginPath()
+  ctx2.arc(centerX, centerY, ballRadius, 0, Math.PI * 2)
+  ctx2.fill()
+  ctx2.strokeStyle = 'rgba(0,0,0,0.15)'
+  ctx2.lineWidth = 1
+  ctx2.stroke()
+
+  // 画三个点
+  const drawDot = (x: number, y: number, color: string, size = 4) => {
+    ctx2.save()
+    ctx2.fillStyle = color
+    ctx2.beginPath()
+    ctx2.arc(x, y, size, 0, Math.PI * 2)
+    ctx2.fill()
+    ctx2.restore()
+  }
+
+  drawDot(centerX, centerY, '#0f172a', 3)        // 目标球中心（固定在中心）
+  drawDot(ghostX, centerY, '#dc2626', 4)         // 鬼球切点投影（红色）
+  drawDot(corridorX, centerY, '#6b7280', 4)      // 走廊中心线投影（灰色）
+
+  // 画投影基准线（水平虚线）
+  ctx2.save()
+  ctx2.strokeStyle = 'rgba(0,0,0,0.2)'
+  ctx2.lineWidth = 1
+  ctx2.setLineDash([3, 3])
+  ctx2.beginPath()
+  ctx2.moveTo(10, centerY)
+  ctx2.lineTo(size - 10, centerY)
+  ctx2.stroke()
+  ctx2.restore()
+
+  // 画刻度线（每厘米一个刻度）
+  ctx2.save()
+  ctx2.strokeStyle = 'rgba(0,0,0,0.15)'
+  ctx2.lineWidth = 1
+  ctx2.setLineDash([])
+  ctx2.font = '9px Arial'
+  ctx2.fillStyle = 'rgba(0,0,0,0.4)'
+  ctx2.textAlign = 'center'
+
+  for (let cm = -10; cm <= 10; cm++) {
+    if (cm === 0) continue // 跳过中心点
+    const x = centerX + cm * cmToPixel
+    if (x >= 10 && x <= size - 10) {
+      // 刻度线
+      ctx2.beginPath()
+      ctx2.moveTo(x, centerY - 3)
+      ctx2.lineTo(x, centerY + 3)
+      ctx2.stroke()
+      // 数字标注（每5cm显示一次）
+      if (cm % 5 === 0) {
+        ctx2.fillText(cm.toString(), x, centerY - 8)
+      }
+    }
+  }
+  ctx2.restore()
+}
+
+function drawTopViewZoom() {
+  const cvs = topViewCanvasRef.value
+  if (!cvs) return
+  if (!topViewCtx) topViewCtx = cvs.getContext('2d')
+  if (!topViewCtx) return
+
+  // 尺寸与清屏
+  const size = 200
+  if (cvs.width !== size || cvs.height !== size) {
+    cvs.width = size; cvs.height = size
+  }
+  const ctx = topViewCtx
+  ctx.clearRect(0, 0, size, size)
+
+  // 放大镜中心：目标球位置
+  const centerWorldX = c3.position.x
+  const centerWorldY = c3.position.y
+  const zoom = zoomLevel.value
+
+  // 坐标转换：世界坐标 -> 放大镜坐标
+  const worldToZoom = (wx: number, wy: number) => ({
+    x: size/2 + (wx - centerWorldX) * zoom,
+    y: size/2 + (wy - centerWorldY) * zoom
+  })
+
+  // 预先计算所有球的缩放坐标
+  const c1Zoom = worldToZoom(c1.position.x, c1.position.y)
+  const c2Zoom = worldToZoom(c2.position.x, c2.position.y)
+  const c3Zoom = worldToZoom(c3.position.x, c3.position.y)
+  const c4Zoom = worldToZoom(c4.position.x, c4.position.y)
+
+  // 绘制背景网格
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0,0,0,0.1)'
+  ctx.lineWidth = 0.5
+  const gridStep = 10 * zoom  // 每1cm一个网格
+  for (let i = -size; i <= size * 2; i += gridStep) {
+    ctx.beginPath()
+    ctx.moveTo(i, 0); ctx.lineTo(i, size)
+    ctx.moveTo(0, i); ctx.lineTo(size, i)
+    ctx.stroke()
+  }
+  ctx.restore()
+
+  // 使用与主视图一致的样式绘制球
+
+  // 绘制母球（c1）- 使用主视图样式
+  if (Math.hypot(c1Zoom.x - size/2, c1Zoom.y - size/2) < size/2 + c1.radius * zoom) {
+    ctx.save()
+    ctx.fillStyle = c1.style?.fillStyle || '#ffffff'
+    ctx.strokeStyle = c1.style?.strokeStyle || '#111827'
+    ctx.lineWidth = (c1.style?.lineWidth || 2) * zoom
+    ctx.beginPath()
+    ctx.arc(c1Zoom.x, c1Zoom.y, c1.radius * zoom, 0, Math.PI * 2)
+    if (c1.style?.fillStyle) ctx.fill()
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 绘制鬼球（c2）- 使用主视图样式
+  if (Math.hypot(c2Zoom.x - size/2, c2Zoom.y - size/2) < size/2 + c2.radius * zoom) {
+    ctx.save()
+    ctx.strokeStyle = c2.style?.strokeStyle || '#334155'
+    ctx.lineWidth = (c2.style?.lineWidth || 2) * zoom
+    if (c2.style?.dashed) {
+      ctx.setLineDash(c2.style.dashed.map(d => d * zoom))
+    }
+    ctx.beginPath()
+    ctx.arc(c2Zoom.x, c2Zoom.y, c2.radius * zoom, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 绘制目标球（c3）- 使用主视图样式
+  ctx.save()
+  ctx.fillStyle = c3.style?.fillStyle || '#f59e0b'
+  ctx.strokeStyle = c3.style?.strokeStyle || '#111827'
+  ctx.lineWidth = (c3.style?.lineWidth || 2) * zoom
+  ctx.beginPath()
+  ctx.arc(c3Zoom.x, c3Zoom.y, c3.radius * zoom, 0, Math.PI * 2)
+  if (c3.style?.fillStyle) ctx.fill()
+  ctx.stroke()
+  ctx.restore()
+
+  // 绘制袋口（c4）- 使用主视图样式
+  if (Math.hypot(c4Zoom.x - size/2, c4Zoom.y - size/2) < size/2 + c4.radius * zoom) {
+    ctx.save()
+    ctx.fillStyle = c4.style?.fillStyle || '#111827'
+    ctx.strokeStyle = c4.style?.strokeStyle || '#111827'
+    ctx.lineWidth = (c4.style?.lineWidth || 1) * zoom
+    ctx.beginPath()
+    ctx.arc(c4Zoom.x, c4Zoom.y, c4.radius * zoom, 0, Math.PI * 2)
+    if (c4.style?.fillStyle) ctx.fill()
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 完全照搬主视图的绘制方法
+
+  // 0. 绘制球杆和线条（照搬 win.render）
+
+  // 绘制球杆线（cueLine）
+  if (showCueLine.value) {
+    ctx.save()
+    ctx.strokeStyle = cueLine.style?.strokeStyle || '#60a5fa'
+    ctx.lineWidth = (cueLine.style?.lineWidth || 1) * zoom
+    if (cueLine.style?.dashed) {
+      ctx.setLineDash(cueLine.style.dashed.map((d: number) => d * zoom))
+    }
+    ctx.beginPath()
+    ctx.moveTo(c1Zoom.x, c1Zoom.y)
+    ctx.lineTo(c2Zoom.x, c2Zoom.y)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 绘制cue射线延长线（计算与放大镜边界的交点）
+  if (showCueRay.value) {
+    const a = { x: c1.position.x, y: c1.position.y }
+    const b = { x: c2.position.x, y: c2.position.y }
+    const v = { x: b.x - a.x, y: b.y - a.y }
+    const L = Math.hypot(v.x, v.y)
+    if (L > 1e-6) {
+      const ux = v.x / L, uy = v.y / L
+
+      // 计算与整个画布边界的交点（无限延长）
+      const W = win.rec.width.value, H = win.rec.height.value
+      const candidates: {x: number, y: number}[] = []
+
+      // 与 x=0, x=W 边界
+      if (Math.abs(ux) > 1e-8) {
+        const t1 = (0 - a.x) / ux, y1 = a.y + uy * t1
+        if (t1 > 0 && y1 >= 0 && y1 <= H) candidates.push({ x: 0, y: y1 })
+        const t2 = (W - a.x) / ux, y2 = a.y + uy * t2
+        if (t2 > 0 && y2 >= 0 && y2 <= H) candidates.push({ x: W, y: y2 })
+      }
+      // 与 y=0, y=H 边界
+      if (Math.abs(uy) > 1e-8) {
+        const t3 = (0 - a.y) / uy, x3 = a.x + ux * t3
+        if (t3 > 0 && x3 >= 0 && x3 <= W) candidates.push({ x: x3, y: 0 })
+        const t4 = (H - a.y) / uy, x4 = a.x + ux * t4
+        if (t4 > 0 && x4 >= 0 && x4 <= W) candidates.push({ x: x4, y: H })
+      }
+
+      // 选择最近的前向交点
+      let end: {x: number, y: number} | null = null
+      let bestT = Infinity
+      for (const p of candidates) {
+        const t = (Math.abs(ux) > Math.abs(uy))
+          ? (p.x - a.x) / ux
+          : (p.y - a.y) / uy
+        if (t > 0 && t < bestT) {
+          bestT = t
+          end = p
+        }
+      }
+
+      if (end) {
+        const aZoom = worldToZoom(a.x, a.y)
+        const endZoom = worldToZoom(end.x, end.y)
+
+        ctx.save()
+        ctx.strokeStyle = '#60a5fa'
+        ctx.lineWidth = 2 * zoom
+        ctx.setLineDash([4 * zoom, 8 * zoom])
+        ctx.beginPath()
+        ctx.moveTo(aZoom.x, aZoom.y)
+        ctx.lineTo(endZoom.x, endZoom.y)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+  }
+
+  // 绘制视线（hitLine）
+  if (showHitLine.value) {
+    const hitEndPoint = getHitLineEndPoint()
+    const hitEndZoom = worldToZoom(hitEndPoint.x, hitEndPoint.y)
+    ctx.save()
+    ctx.strokeStyle = hitLine.style?.strokeStyle || '#22c55e'
+    ctx.lineWidth = (hitLine.style?.lineWidth || 1) * zoom
+    if (hitLine.style?.dashed) {
+      ctx.setLineDash(hitLine.style.dashed.map((d: number) => d * zoom))
+    }
+    ctx.beginPath()
+    ctx.moveTo(c1Zoom.x, c1Zoom.y)
+    ctx.lineTo(hitEndZoom.x, hitEndZoom.y)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 绘制ST线（stLine）
+  if (showSTLine.value) {
+    ctx.save()
+    ctx.strokeStyle = stLine.style?.strokeStyle || '#a78bfa'
+    ctx.lineWidth = (stLine.style?.lineWidth || 1) * zoom
+    if (stLine.style?.dashed) {
+      ctx.setLineDash(stLine.style.dashed.map((d: number) => d * zoom))
+    }
+    ctx.beginPath()
+    ctx.moveTo(c2Zoom.x, c2Zoom.y)
+    ctx.lineTo(c3Zoom.x, c3Zoom.y)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+
+
+  // 1. 绘制走廊（照搬 drawCorridor）
+  if (c2.config.visible && showCorridor.value) {
+    const a = { x: c1.position.x, y: c1.position.y }
+    const b = { x: c2.position.x, y: c2.position.y }
+    const v = { x: b.x - a.x, y: b.y - a.y }
+    const L = Math.hypot(v.x, v.y)
+    if (L > 1e-6) {
+      const ux = v.x / L, uy = v.y / L
+      const nx = -uy, ny = ux
+      const d = c1.radius
+      const aL = { x: a.x + nx * d, y: a.y + ny * d }
+      const bL = { x: b.x + nx * d, y: b.y + ny * d }
+      const aR = { x: a.x - nx * d, y: a.y - ny * d }
+      const bR = { x: b.x - nx * d, y: b.y - ny * d }
+
+      const p3 = { x: c3.position.x, y: c3.position.y }
+      const hitL = pointSegmentDistance(p3, aL, bL) <= c3.radius + 0.5
+      const hitR = pointSegmentDistance(p3, aR, bR) <= c3.radius + 0.5
+
+      const aLZoom = worldToZoom(aL.x, aL.y)
+      const bLZoom = worldToZoom(bL.x, bL.y)
+      const aRZoom = worldToZoom(aR.x, aR.y)
+      const bRZoom = worldToZoom(bR.x, bR.y)
+
+      ctx.save()
+      ctx.strokeStyle = hitL ? '#ef4444' : '#94a3b8'
+      ctx.lineWidth = 1.5 * zoom
+      ctx.setLineDash([8 * zoom, 6 * zoom])
+      ctx.beginPath()
+      ctx.moveTo(aLZoom.x, aLZoom.y)
+      ctx.lineTo(bLZoom.x, bLZoom.y)
+      ctx.stroke()
+
+      ctx.strokeStyle = hitR ? '#ef4444' : '#94a3b8'
+      ctx.beginPath()
+      ctx.moveTo(aRZoom.x, aRZoom.y)
+      ctx.lineTo(bRZoom.x, bRZoom.y)
+      ctx.stroke()
+      ctx.restore()
+    }
+  }
+
+  // 2. 绘制发射射线已在上面绘制，这里跳过
+
+  // 3. 绘制球洞射线（从球洞到目标球中心）
+  if (showPocketRay.value) {
+    const a = { x: c4.position.x, y: c4.position.y } // 球洞位置
+    const b = { x: c3.position.x, y: c3.position.y } // 目标球中心
+
+    // 直接连接球洞和目标球中心
+    const aZoom = worldToZoom(a.x, a.y)
+    const bZoom = worldToZoom(b.x, b.y)
+
+    ctx.save()
+    ctx.strokeStyle = '#bbbbbb'
+    ctx.lineWidth = 1 * zoom
+    ctx.setLineDash([4 * zoom, 4 * zoom])
+    ctx.beginPath()
+    ctx.moveTo(aZoom.x, aZoom.y)
+    ctx.lineTo(bZoom.x, bZoom.y)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 4. 绘制动态视线（照搬 drawDynamicHitLine）
+  if (showHitLine.value) {
+    const p1 = { x: c1.position.x, y: c1.position.y }
+    const endPoint = getHitLineEndPoint()
+    const p1Zoom = worldToZoom(p1.x, p1.y)
+    const endZoom = worldToZoom(endPoint.x, endPoint.y)
+
+    ctx.save()
+    ctx.strokeStyle = '#22c55e'
+    ctx.lineWidth = 1 * zoom
+    ctx.setLineDash([])
+    ctx.beginPath()
+    ctx.moveTo(p1Zoom.x, p1Zoom.y)
+    ctx.lineTo(endZoom.x, endZoom.y)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  // 5. 绘制球洞射线与视线夹角（照搬 drawPocketHitAngle）
+  if (showPocketHitAngle.value && showPocketRay.value && showHitLine.value) {
+    const p1 = { x: c1.position.x, y: c1.position.y }
+    const p4 = { x: c4.position.x, y: c4.position.y }
+    const hitEndPoint = getHitLineEndPoint()
+
+    const vHit = { x: p1.x - hitEndPoint.x, y: p1.y - hitEndPoint.y }
+    const vPocket = { x: hitEndPoint.x - p4.x, y: hitEndPoint.y - p4.y }
+
+    const LHit = Math.hypot(vHit.x, vHit.y)
+    const LPocket = Math.hypot(vPocket.x, vPocket.y)
+    if (LHit > 1e-6 && LPocket > 1e-6) {
+      const uhx = vHit.x / LHit, uhy = vHit.y / LHit
+      const upx = vPocket.x / LPocket, upy = vPocket.y / LPocket
+
+      const lineLength = c3.radius * pocketAngleDistance.value
+      const hitLineEnd = { x: hitEndPoint.x + uhx * lineLength, y: hitEndPoint.y + uhy * lineLength }
+      const pocketLineEnd = { x: hitEndPoint.x + upx * lineLength, y: hitEndPoint.y + upy * lineLength }
+
+      const centerZoom = worldToZoom(hitEndPoint.x, hitEndPoint.y)
+      const hitEndZoom = worldToZoom(hitLineEnd.x, hitLineEnd.y)
+      const pocketEndZoom = worldToZoom(pocketLineEnd.x, pocketLineEnd.y)
+
+      ctx.save()
+      ctx.strokeStyle = '#00cc00'
+      ctx.lineWidth = 2.5 * zoom
+      ctx.setLineDash([])
+
+      ctx.beginPath()
+      ctx.moveTo(centerZoom.x, centerZoom.y)
+      ctx.lineTo(hitEndZoom.x, hitEndZoom.y)
+      ctx.stroke()
+
+      ctx.beginPath()
+      ctx.moveTo(centerZoom.x, centerZoom.y)
+      ctx.lineTo(pocketEndZoom.x, pocketEndZoom.y)
+      ctx.stroke()
+      ctx.restore()
+    }
+  }
+
+  // 6. 绘制切线桥（照搬 drawTangentBridge 的关键部分）
+  if (c2.config.visible) {
+    const p1 = { x: c1.position.x, y: c1.position.y }
+    const p2 = { x: c2.position.x, y: c2.position.y }
+    const p3 = { x: c3.position.x, y: c3.position.y }
+
+    const v12 = { x: p2.x - p1.x, y: p2.y - p1.y }
+    const L12 = Math.hypot(v12.x, v12.y)
+    if (L12 > 1e-6) {
+      const u12 = { x: v12.x / L12, y: v12.y / L12 }
+      const v23 = { x: p3.x - p2.x, y: p3.y - p2.y }
+      const L23 = Math.hypot(v23.x, v23.y)
+      if (L23 > 1e-6) {
+        const u23 = { x: v23.x / L23, y: v23.y / L23 }
+        const contactPoint = { x: p2.x + u23.x * c2.radius, y: p2.y + u23.y * c2.radius }
+
+        const toContact = { x: contactPoint.x - p1.x, y: contactPoint.y - p1.y }
+        const projDist = toContact.x * u12.x + toContact.y * u12.y
+        const projPoint = { x: p1.x + u12.x * projDist, y: p1.y + u12.y * projDist }
+
+        const contactZoom = worldToZoom(contactPoint.x, contactPoint.y)
+        const projZoom = worldToZoom(projPoint.x, projPoint.y)
+
+        ctx.save()
+        ctx.strokeStyle = '#00ff00'  // 亮绿色，与主视图一致
+        ctx.lineWidth = 2.5 * zoom   // 与主视图一致的线宽
+        ctx.setLineDash([])
+        ctx.beginPath()
+        ctx.moveTo(contactZoom.x, contactZoom.y)
+        ctx.lineTo(projZoom.x, projZoom.y)
+        ctx.stroke()
+        ctx.restore()
+      }
+    }
+  }
+
+  // 绘制目标球中心点偏移标注（放大视图版本）
+  if (showCenterOffset.value) {
+    const line = getCueCorridorLine()
+    if (line) {
+      const center = { x: c3.position.x, y: c3.position.y } // 目标球中心点
+      const dCenterPx = signedPerpDistanceToLine(center, line.A, line.dir)
+
+      // 计算垂足点（目标球中心在走廊中心线上的投影点）
+      const projDist = (center.x - line.A.x) * line.dir.x + (center.y - line.A.y) * line.dir.y
+      const projPoint = {
+        x: line.A.x + line.dir.x * projDist,
+        y: line.A.y + line.dir.y * projDist
+      }
+
+      // 转换为放大视图坐标
+      const centerZoom = worldToZoom(center.x, center.y)
+      const projZoom = worldToZoom(projPoint.x, projPoint.y)
+
+      // 绘制从目标球中心到走廊中心线的垂直线段
+      ctx.save()
+      ctx.strokeStyle = '#aaaaaa'
+      ctx.lineWidth = 2 * zoom
+      ctx.setLineDash([4 * zoom, 4 * zoom]) // 虚线
+      ctx.beginPath()
+      ctx.moveTo(centerZoom.x, centerZoom.y)
+      ctx.lineTo(projZoom.x, projZoom.y)
+      ctx.stroke()
+      ctx.restore()
+    }
+  }
+
+  // 绘制十字准星（中心标记）
+  ctx.save()
+  ctx.strokeStyle = 'rgba(0,0,0,0.4)'
+  ctx.lineWidth = 1
+  ctx.setLineDash([])
+  ctx.beginPath()
+  ctx.moveTo(size/2 - 8, size/2); ctx.lineTo(size/2 + 8, size/2)
+  ctx.moveTo(size/2, size/2 - 8); ctx.lineTo(size/2, size/2 + 8)
+  ctx.stroke()
+  ctx.restore()
+}
+
+
 
 // 初始化 Window
 let win = new Window(0, 0, 800, 500)
@@ -881,15 +1538,19 @@ function drawTangentBridge() {
   if (!(Lh > 1e-6)) { bridgeLenCm.value = '—'; return }
   const uh = { x: vHit.x / Lh, y: vHit.y / Lh }
 
-  // 计算接触点
+  // 计算接触点：统一使用鬼球切点
+  // 鬼球切点 = 鬼球圆心 + 方向向量 × 鬼球半径
+  const p3 = { x: c3.position.x, y: c3.position.y } // 目标球圆心
+  const vGhost = { x: p3.x - p2.x, y: p3.y - p2.y } // 鬼球到目标球方向
+  const LGhost = Math.hypot(vGhost.x, vGhost.y)
   let contact: P
-  if (hitLineMode.value === 'center') {
-    // Center模式：视线与目标球的接触点（靠近 c1）
-    const p3 = { x: c3.position.x, y: c3.position.y }
-    contact = { x: p3.x - uh.x * c3.radius, y: p3.y - uh.y * c3.radius }
+  if (LGhost > 1e-6) {
+    const ugx = vGhost.x / LGhost, ugy = vGhost.y / LGhost
+    // 鬼球切点：鬼球圆心 + 方向向量 × 鬼球半径
+    contact = { x: p2.x + ugx * c2.radius, y: p2.y + ugy * c2.radius }
   } else {
-    // Ghost模式：接触点就是视线终点（鬼球切点）
-    contact = hitEndPoint
+    // 如果鬼球和目标球重合，使用鬼球圆心
+    contact = { x: p2.x, y: p2.y }
   }
 
   // 蓝色虚线方向（c1 -> c2）
@@ -1189,6 +1850,50 @@ function getOffsetAtAngle(targetAngle: number): number | null {
   }
 }
 
+// 绘制目标球中心点相对走廊中心线的偏移标注
+function drawCenterOffsetAnnotation() {
+  if (!showCenterOffset.value || !ctx) return
+
+  const line = getCueCorridorLine()
+  if (!line) return
+
+  const center = { x: c3.position.x, y: c3.position.y } // 目标球中心点
+  const dCenterPx = signedPerpDistanceToLine(center, line.A, line.dir)
+
+  // 计算垂足点（目标球中心在走廊中心线上的投影点）
+  const projDist = (center.x - line.A.x) * line.dir.x + (center.y - line.A.y) * line.dir.y
+  const projPoint = {
+    x: line.A.x + line.dir.x * projDist,
+    y: line.A.y + line.dir.y * projDist
+  }
+
+  // 转换为屏幕坐标
+  const sCenter = win.toScreen(center)
+  const sProj = win.toScreen(projPoint)
+
+  // 绘制从目标球中心到走廊中心线的垂直线段
+  ctx.save()
+  ctx.strokeStyle = '#aaaaaa'
+  ctx.lineWidth = 2
+  ctx.setLineDash([4, 4]) // 虚线
+  ctx.beginPath()
+  ctx.moveTo(sCenter.x, sCenter.y)
+  ctx.lineTo(sProj.x, sProj.y)
+  ctx.stroke()
+  ctx.restore()
+
+  // 在线段中点标注距离
+  const midPoint = { x: (sCenter.x + sProj.x) / 2, y: (sCenter.y + sProj.y) / 2 }
+  const distanceCm = Math.abs(dCenterPx) / Math.max(0.0001, pxPerCm.value)
+  const label = `${distanceCm.toFixed(1)}cm`
+
+  // 调整标注位置，避免与线段重叠
+  const offsetX = (sCenter.x - sProj.x) > 0 ? 15 : -15
+  const offsetY = (sCenter.y - sProj.y) > 0 ? -15 : 15
+
+  drawTextLabel(label, midPoint.x + offsetX, midPoint.y + offsetY)
+}
+
 function drawOverlays() {
   if (!ctx) return
   // 过母球的水平/竖直虚线
@@ -1205,6 +1910,28 @@ function drawOverlays() {
   drawPocketHitAngle()
   // 目标球切线桥（瞄准偏移，在角度实线之上）
   drawTangentBridge()
+  // 目标球中心点偏移标注
+  drawCenterOffsetAnnotation()
+  // 更新两个“相对走廊中心线”的偏移读数，并更新正视图数据
+  updateOffsets()
+  // 同步像素值用于正视图绘制
+  ;(function syncFrontViewData(){
+    // 使用与 updateOffsets 相同的几何，直接再算一次像素值
+    const line = getCueCorridorLine()
+    if (line) {
+      const entry = getObjectEntryPoint()
+      const center = { x: c3.position.x, y: c3.position.y }
+      entryOffsetPx.value = signedPerpDistanceToLine(entry, line.A, line.dir)
+      centerOffsetPx.value = signedPerpDistanceToLine(center, line.A, line.dir)
+    } else {
+      entryOffsetPx.value = null; centerOffsetPx.value = null
+    }
+    // 当前角度（与你现有“球洞线与视线”的角度一致）
+    const angle = getCurrentAngle()
+    currentAngleDeg.value = angle
+  })()
+  drawFrontView()
+  drawTopViewZoom()
   // 长度与角度标注
   drawLengthLabels()
   drawCueHitAngleAtC1()
@@ -1312,8 +2039,30 @@ onBeforeUnmount(() => {
         约束：r1 = r2 = r；并单独让 r3 = r。动态计算 c2，使 c2、c3、c4 三点共线且 c2 与 c3 外切。<br>
         鼠标：拖动母球(c1)/目标球(c3)；点击 6 个洞选择目标洞(c4)。<br>
         点击移动模式：先点击球选中，再点击空白处移动。侧栏可精确控制球位置。<br>
-        新功能：球洞射线显示球洞到目标球的射线，并计算与视线的夹角。
       </p>
+
+      <!-- 左上角：正视图与读数 -->
+      <div class="frontview-box">
+        <canvas ref="fvCanvasRef" class="fv-cvs"></canvas>
+        <div class="fv-labels">
+          <div>∠(洞线,视线) = <output>{{ currentAngleDeg?.toFixed(1) ?? '—' }}</output>°</div>
+          <div>打点偏移(红点) = <output>{{ ghostOffsetCm?.toFixed(1) ?? '—' }}</output>cm</div>
+          <div>瞄点偏移(灰点) = <output>{{ corridorOffsetCm?.toFixed(1) ?? '—' }}</output>cm</div>
+        </div>
+      </div>
+
+      <!-- 俯视图放大镜 -->
+      <div class="topview-box">
+        <div class="tv-header">
+          <span>俯视图放大镜</span>
+          <div class="zoom-controls">
+            <button @click="zoomLevel = Math.max(1, zoomLevel - 0.5)" class="zoom-btn">-</button>
+            <span class="zoom-display">{{ zoomLevel }}x</span>
+            <button @click="zoomLevel = Math.min(10, zoomLevel + 0.5)" class="zoom-btn">+</button>
+          </div>
+        </div>
+        <canvas ref="topViewCanvasRef" class="tv-cvs"></canvas>
+      </div>
 
       <div class="grid">
 
@@ -1395,6 +2144,7 @@ onBeforeUnmount(() => {
           <label><input type="checkbox" v-model="showAngleCueHit" /> ∠(瞄准线,视线)</label>
           <label><input type="checkbox" v-model="showAngleHV" /> ∠(瞄准线,十字线)</label>
           <label><input type="checkbox" v-model="showPocketHitAngle" /> ∠(球洞线,视线)</label>
+          <label><input type="checkbox" v-model="showCenterOffset" /> 目标球中心偏移标注</label>
         </fieldset>
 
         <fieldset>
@@ -1515,8 +2265,9 @@ onBeforeUnmount(() => {
     </div>
 
     <div class="output-box">
-      Offset = 
-      <output>{{ bridgeLenCm }}</output>
+      Entry Point Offset = <output>{{ entryOffsetCm }}</output>
+      <br />
+      Center Point Offset = <output>{{ centerOffsetCm }}</output>
     </div>
   </div>
 </template>
@@ -1540,6 +2291,71 @@ onBeforeUnmount(() => {
   margin: 0 0 8px 0;
   font-size: 16px;
 }
+  .frontview-box {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    align-items: start;
+    margin: 4px 0 10px 0;
+    padding: 6px;
+    border: 1px dashed #d1d5db;
+    border-radius: 6px;
+    background: #ffffff;
+  }
+  .fv-cvs {
+    width: 160px; height: 160px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
+  }
+  .fv-labels { font-size: 12px; color: #111827; display: grid; grid-template-columns: 1fr; gap: 2px; }
+
+  .topview-box {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: 6px;
+    align-items: start;
+    margin: 10px 0;
+    padding: 6px;
+    border: 1px dashed #d1d5db;
+    border-radius: 6px;
+    background: #ffffff;
+  }
+  .tv-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+  }
+  .zoom-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .zoom-btn {
+    width: 24px;
+    height: 20px;
+    border: 1px solid #d1d5db;
+    background: #f9fafb;
+    border-radius: 3px;
+    font-size: 12px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .zoom-btn:hover {
+    background: #e5e7eb;
+  }
+  .zoom-display {
+    font-size: 11px;
+    color: #6b7280;
+    min-width: 24px;
+    text-align: center;
+  }
+  .tv-cvs {
+    width: 200px; height: 200px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
+  }
+
 .hint {
   font-size: 12px;
   color: #6b7280;
