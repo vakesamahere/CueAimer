@@ -114,8 +114,8 @@ function updateOffsets() {
   const { ghostContactProj, corridorProj } = projData
 
   // 转换为厘米（与正视图完全相同的计算）
-  const entryOffsetCmValue = Math.abs(ghostContactProj) / Math.max(0.0001, pxPerCm.value)
-  const centerOffsetCmValue = Math.abs(corridorProj) / Math.max(0.0001, pxPerCm.value)
+  const entryOffsetCmValue = Math.abs(ghostContactProj) / Math.max(0.0001, getActualPxPerCm())
+  const centerOffsetCmValue = Math.abs(corridorProj) / Math.max(0.0001, getActualPxPerCm())
 
   entryOffsetCm.value = `${entryOffsetCmValue.toFixed(1)} cm`
   centerOffsetCm.value = `${centerOffsetCmValue.toFixed(1)} cm`
@@ -137,6 +137,7 @@ const zoomLevel = ref<number>(2)  // 放大倍率，默认2倍
 // 正视图 canvas
 const fvCanvasRef = ref<HTMLCanvasElement | null>(null)
 let fvCtx: CanvasRenderingContext2D | null = null
+const frontViewZoom = ref<number>(1)  // 正视图缩放倍率，默认1倍（自动）
 
 // 计算正视图投影：过目标球圆心做视线的垂线作为投影基准线
 function getFrontViewProjections(): { ghostContactProj: number; corridorProj: number } | null {
@@ -230,18 +231,25 @@ function drawFrontView() {
   const centerX = size / 2
   const centerY = size / 2
 
-  // 动态比例：左右各留球直径向上取整的空间
-  const ballDiameterCm = ballDiameter.value
-  const marginCm = Math.ceil(ballDiameterCm) // 向上取整
-  const viewWidthCm = ballDiameterCm + 2 * marginCm // 球直径 + 左右各留margin
-  const cmToPixel = size / viewWidthCm  // 动态计算每厘米对应的像素
+  // 缩放比例：根据frontViewZoom设置
+  let cmToPixel: number
+  if (frontViewZoom.value === 1) {
+    // 自动模式：球上下左右只留1个半径的空间
+    const ballRadiusCm = r.value // 球半径（厘米）
+    const marginCm = ballRadiusCm * 1 // 上下左右各留1个半径
+    const viewWidthCm = ballRadiusCm * 2 + 2 * marginCm // 球直径 + 左右各留margin
+    cmToPixel = size / viewWidthCm  // 动态计算每厘米对应的像素
+  } else {
+    // 手动缩放模式
+    cmToPixel = 8 * frontViewZoom.value  // 基础8像素/厘米 × 缩放倍率
+  }
 
   // 球半径：按实际球半径（厘米）× 像素比例
   const ballRadius = r.value * cmToPixel  // 实际球半径转换为像素
 
   // 计算各点的屏幕坐标（y=centerY，x根据投影距离计算）
-  const ghostProjCm = ghostContactProj / Math.max(0.0001, pxPerCm.value)  // 转换为厘米
-  const corridorProjCm = corridorProj / Math.max(0.0001, pxPerCm.value)   // 转换为厘米
+  const ghostProjCm = ghostContactProj / Math.max(0.0001, getActualPxPerCm())  // 转换为厘米
+  const corridorProjCm = corridorProj / Math.max(0.0001, getActualPxPerCm())   // 转换为厘米
 
   const ghostX = centerX + ghostProjCm * cmToPixel
   const corridorX = centerX + corridorProjCm * cmToPixel
@@ -354,7 +362,7 @@ function drawTopViewZoom() {
   ctx.save()
   ctx.strokeStyle = 'rgba(0,0,0,0.1)'
   ctx.lineWidth = 0.5
-  const gridStep = 10 * zoom  // 每1cm一个网格
+  const gridStep = getActualPxPerCm() * zoom  // 每1cm一个网格，考虑实际缩放
   for (let i = -size; i <= size * 2; i += gridStep) {
     ctx.beginPath()
     ctx.moveTo(i, 0); ctx.lineTo(i, size)
@@ -757,6 +765,12 @@ function getTableFrame() {
   return { W, H, idealW, idealH, scale, drawW, drawH, offX, offY, cx: offX + drawW / 2, cy: offY + drawH / 2 }
 }
 
+// 获取实际的像素/厘米比例（考虑桌面缩放）
+function getActualPxPerCm() {
+  const { scale } = getTableFrame()
+  return pxPerCm.value * scale
+}
+
 // DPR 适配 + 尺寸同步 + 生成 8 洞
 function resizeCanvas() {
   const cvs = canvasRef.value
@@ -780,9 +794,8 @@ function resizeCanvas() {
   win.horizon.ratio.value = 1
 
   // 8 个洞：四角 + 四边中点
-  const { drawW, drawH, offX, offY, scale, cx, cy } = getTableFrame()
-  const mPx = cushionMarginCm * pxPerCm.value * scale
-  const prPx = pocketRcm.value * pxPerCm.value * scale
+  const { drawW, drawH, offX, offY, cx } = getTableFrame()
+  const prPx = pocketRcm.value * getActualPxPerCm()
   // 袋口直径位置画到桌子的边缘
   const left = offX
   const right = offX + drawW
@@ -856,7 +869,7 @@ function recomputeC2() {
 
 // r1 = r2 = rPx；并单独“让 r3 = rPx”
 watchEffect(() => {
-  const rPx = r.value * pxPerCm.value
+  const rPx = r.value * getActualPxPerCm()
   c1.radius = rPx
   c2.radius = rPx
   c3.radius = rPx
@@ -868,7 +881,7 @@ watchEffect(() => {
   void c1.position.x; void c1.position.y
   void c3.position.x; void c3.position.y
   void c4.position.x; void c4.position.y
-  const _ratio = pxPerCm.value
+  void pxPerCm.value // 监听比例变化
   if (isInitialized.value) {
     // resizeCanvas()
   }
@@ -1023,10 +1036,11 @@ function onMouseLeave(){
 // 根据滑动条位置更新球的位置
 function updateBallFromSliders() {
   const { offX, drawW, offY, drawH } = getTableFrame()
-  const margin = cushionMarginCm * pxPerCm.value
+  const actualPxPerCm = getActualPxPerCm()
+  const margin = cushionMarginCm * actualPxPerCm
 
   // 计算可移动区域（考虑球的半径和胶边）
-  const ballRadius = r.value * pxPerCm.value
+  const ballRadius = r.value * actualPxPerCm
   const minX = offX + margin + ballRadius
   const maxX = offX + drawW - margin - ballRadius
   const minY = offY + margin + ballRadius
@@ -1047,8 +1061,9 @@ function updateBallFromSliders() {
 // 根据球的位置更新滑动条
 function updateSlidersFromBall() {
   const { offX, drawW, offY, drawH } = getTableFrame()
-  const margin = cushionMarginCm * pxPerCm.value
-  const ballRadius = r.value * pxPerCm.value
+  const actualPxPerCm = getActualPxPerCm()
+  const margin = cushionMarginCm * actualPxPerCm
+  const ballRadius = r.value * actualPxPerCm
 
   const minX = offX + margin + ballRadius
   const maxX = offX + drawW - margin - ballRadius
@@ -1147,7 +1162,7 @@ function angleBetween(ax: number, ay: number, bx: number, by: number) {
 }
 function lengthCm(p1: P, p2: P) {
   const lenPx = Math.hypot(p2.x - p1.x, p2.y - p1.y)
-  const cm = lenPx / Math.max(0.0001, pxPerCm.value)
+  const cm = lenPx / Math.max(0.0001, getActualPxPerCm())
   return { lenPx, cm }
 }
 function pointSegmentDistance(pt: P, a: P, b: P) {
@@ -1512,7 +1527,7 @@ function drawTangentBridge() {
 
     // 计算鬼球切点到交点的距离
     const distance = Math.hypot(intersection.x - ghostContact.x, intersection.y - ghostContact.y)
-    const distanceCm = distance / Math.max(0.0001, pxPerCm.value)
+    const distanceCm = distance / Math.max(0.0001, getActualPxPerCm())
 
     // 绘制线段
     const sA = win.toScreen(ghostContact)
@@ -1888,7 +1903,7 @@ function drawCenterOffsetAnnotation() {
 
   // 在线段中点标注距离
   const midPoint = { x: (sCenter.x + sProj.x) / 2, y: (sCenter.y + sProj.y) / 2 }
-  const distanceCm = Math.abs(dCenterPx) / Math.max(0.0001, pxPerCm.value)
+  const distanceCm = Math.abs(dCenterPx) / Math.max(0.0001, getActualPxPerCm())
   const label = `${distanceCm.toFixed(1)}cm`
 
   // 调整标注位置，避免与线段重叠
@@ -2047,6 +2062,15 @@ onBeforeUnmount(() => {
 
       <!-- 左上角：正视图与读数 -->
       <div class="frontview-box">
+        <div class="fv-header">
+          <span>正视图</span>
+          <div class="zoom-controls" v-if="false">
+            <button @click="frontViewZoom = 1" class="zoom-btn auto-btn" :class="{ active: frontViewZoom === 1 }">自动</button>
+            <button @click="frontViewZoom = Math.max(0.5, frontViewZoom - 0.5)" class="zoom-btn" :disabled="frontViewZoom === 1">-</button>
+            <span class="zoom-display">{{ frontViewZoom === 1 ? '自动' : frontViewZoom + 'x' }}</span>
+            <button @click="frontViewZoom = Math.min(5, frontViewZoom + 0.5)" class="zoom-btn" :disabled="frontViewZoom === 1">+</button>
+          </div>
+        </div>
         <canvas ref="fvCanvasRef" class="fv-cvs"></canvas>
         <div class="fv-labels">
           <div>∠(洞线,视线) = <output>{{ currentAngleDeg?.toFixed(1) ?? '—' }}</output>°</div>
@@ -2306,6 +2330,14 @@ onBeforeUnmount(() => {
     border-radius: 6px;
     background: #ffffff;
   }
+  .fv-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 12px;
+    font-weight: 600;
+    color: #374151;
+  }
   .fv-cvs {
     width: 200px; height: 200px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
   }
@@ -2349,6 +2381,18 @@ onBeforeUnmount(() => {
   }
   .zoom-btn:hover {
     background: #e5e7eb;
+  }
+  .zoom-btn.active {
+    background: #3b82f6;
+    color: white;
+    border-color: #2563eb;
+  }
+  .zoom-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+  .auto-btn {
+    width: 32px;
   }
   .zoom-display {
     font-size: 11px;
