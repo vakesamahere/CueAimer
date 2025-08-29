@@ -61,6 +61,7 @@ const showAngleHV = ref(false)
 const showLengths = ref(false)
 const showPocketHitAngle = ref(true) // 显示球洞射线与视线的夹角
 const showCenterOffset = ref(true) // 显示目标球中心点相对走廊中心线的偏移标注
+const showFrontGuides = ref(false) // 正视图辅助线（中心、±1/2、±1/4、±1/8）
 const hvOffsetMul = ref(6) // 与水平/竖直角度标注距交点的倍数（×球半径）
 const pocketAngleDistance = ref(3) // 球洞射线角度标注距离交点的倍数（×球半径）
 // 视线生成逻辑
@@ -274,6 +275,25 @@ function drawFrontView() {
   ctx2.strokeStyle = 'rgba(0,0,0,0.15)'
   ctx2.lineWidth = 1
   ctx2.stroke()
+
+  // 辅助线：中心、±1/2、±1/4、±3/4 共 7 条
+  if (showFrontGuides.value) {
+    ctx2.save()
+    ctx2.strokeStyle = 'rgba(0,0,0,1)'
+    ctx2.lineWidth = 0.4
+    ctx2.setLineDash([4, 3])
+    const fractions = [0, 1/2, -1/2, 1/4, -1/4, 3/4, -3/4]
+    for (const f of fractions) {
+      const x = centerX + f * ballRadius
+      ctx2.beginPath()
+      const y = Math.sqrt(ballRadius*ballRadius - (x-centerX)*(x-centerX))
+      // const y = ballRadius*2
+      ctx2.moveTo(x, centerY - y)
+      ctx2.lineTo(x, centerY + y)
+      ctx2.stroke()
+    }
+    ctx2.restore()
+  }
 
   // 画三个点
   const drawDot = (x: number, y: number, color: string, size = 4) => {
@@ -2097,12 +2117,10 @@ onBeforeUnmount(() => {
       <div class="frontview-box">
         <div class="fv-header">
           <span>正视图</span>
-          <div class="zoom-controls" v-if="false">
-            <button @click="frontViewZoom = 1" class="zoom-btn auto-btn" :class="{ active: frontViewZoom === 1 }">自动</button>
-            <button @click="frontViewZoom = Math.max(0.5, frontViewZoom - 0.5)" class="zoom-btn" :disabled="frontViewZoom === 1">-</button>
-            <span class="zoom-display">{{ frontViewZoom === 1 ? '自动' : frontViewZoom + 'x' }}</span>
-            <button @click="frontViewZoom = Math.min(5, frontViewZoom + 0.5)" class="zoom-btn" :disabled="frontViewZoom === 1">+</button>
-          </div>
+          <label class="fv-guides-toggle" title="显示目标球内部的中心、±1/2、±1/4、±1/8 半径辅助线">
+            <input type="checkbox" v-model="showFrontGuides" />
+            辅助线
+          </label>
         </div>
         <canvas ref="fvCanvasRef" class="fv-cvs"></canvas>
         <div class="fv-labels">
@@ -2384,6 +2402,19 @@ onBeforeUnmount(() => {
     font-size: 12px;
     font-weight: 600;
     color: #374151;
+  }
+  .fv-guides-toggle {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    color: #374151;
+    cursor: pointer;
+    user-select: none;
+  }
+  .fv-guides-toggle input {
+    margin: 0;
   }
   .fv-cvs {
     width: 200px; height: 200px; display: block; background: #f8fafc; border:1px solid #e5e7eb; border-radius: 4px;
