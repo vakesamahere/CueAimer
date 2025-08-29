@@ -2107,8 +2107,16 @@ onBeforeUnmount(() => {
         <canvas ref="fvCanvasRef" class="fv-cvs"></canvas>
         <div class="fv-labels">
           <div>∠(洞线,视线) = <output>{{ currentAngleDeg?.toFixed(1) ?? '—' }}</output>°</div>
-          <div>打点偏移(红点: 与目标球的接触点) = <output>{{ ghostOffsetCm?.toFixed(1) ?? '—' }}</output>cm</div>
-          <div>瞄点偏移(灰点: 球杆应瞄准的位置) = <output>{{ corridorOffsetCm?.toFixed(1) ?? '—' }}</output>cm</div>
+            <div>
+            打点偏移
+            <span style="text-decoration:underline;cursor:pointer;" title="红点: 与目标球的接触点">(?)</span>
+            = <output>{{ ghostOffsetCm?.toFixed(1) ?? '—' }}</output>cm
+            </div>
+            <div>
+            瞄点偏移
+            <span style="text-decoration:underline;cursor:pointer;" title="灰点: 球杆应瞄准的位置">(?)</span>
+            = <output>{{ corridorOffsetCm?.toFixed(1) ?? '—' }}</output>cm
+            </div>
         </div>
       </div>
 
@@ -2342,7 +2350,7 @@ onBeforeUnmount(() => {
 <style scoped>
 .wrap {
   display: grid;
-  grid-template-columns: 380px 1fr;
+  grid-template-columns: 260px 1fr;
   gap: 16px;
   padding: 16px;
   box-sizing: border-box;
