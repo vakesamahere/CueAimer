@@ -276,18 +276,31 @@ function drawFrontView() {
   ctx2.lineWidth = 1
   ctx2.stroke()
 
-  // 辅助线：中心、±1/2、±1/4、±3/4 共 7 条
+  // 辅助线：中心、±1/2、(±1/4、±3/4) 共 7 条，使用笔刷
+  // 颜色方案：
+  //   中心线(0)      -> 强度 10. #111827
+  //   ±1/2 线        -> 中度 0.8 #d946ef
+  //   ±1/4 ±3/4 线   -> 轻度 0.6 #6366f1
   if (showFrontGuides.value) {
     ctx2.save()
-    ctx2.strokeStyle = 'rgba(0,0,0,1)'
-    ctx2.lineWidth = 0.4
     ctx2.setLineDash([4, 3])
     const fractions = [0, 1/2, -1/2, 1/4, -1/4, 3/4, -3/4]
     for (const f of fractions) {
+      // 分类设置画笔
+      if (f === 0) {
+        ctx2.strokeStyle = '#111827'
+        ctx2.lineWidth = 1
+      } else if (Math.abs(f) === 0.5) {
+        ctx2.strokeStyle = '#111827'
+        ctx2.lineWidth = 0.8
+      } else {
+        ctx2.strokeStyle = '#6366f1'
+        ctx2.lineWidth = 0.6
+      }
       const x = centerX + f * ballRadius
+      // 垂直可见长度 = 圆在该 x 处的弦长/2
+      const y = Math.sqrt(Math.max(0, ballRadius * ballRadius - (x - centerX) * (x - centerX)))
       ctx2.beginPath()
-      const y = Math.sqrt(ballRadius*ballRadius - (x-centerX)*(x-centerX))
-      // const y = ballRadius*2
       ctx2.moveTo(x, centerY - y)
       ctx2.lineTo(x, centerY + y)
       ctx2.stroke()
